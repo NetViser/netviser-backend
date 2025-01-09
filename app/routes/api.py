@@ -68,30 +68,24 @@ async def upload_file(
     except Exception as e:
         return e
 
-
-@router.post("/store-json")
-async def store_json(
-    response: Response,
-    session_id: Optional[str] = Cookie(None),
-    payload: Dict[str, Any] = Body(...),
+@router.get("/get-file-name")
+async def get_file_name(
+    session_id: str = Cookie(None)
 ):
     """
-    Stores the provided JSON payload in a Redis session. 
-    If there is no existing session_id, a new one is created.
+    Retrieve the file name or value pair stored in the session data based on the session_id.
     """
     if not session_id:
-        # If the user doesn't have a session_id, create a new one
-        session_id = str(uuid.uuid4())
-        # Set the cookie with a 5-minute expiration
-        response.set_cookie(key=SESSION_COOKIE_NAME, value=session_id, max_age=300)
-    
-    # Store or update the session data in Redis with a 5-minute TTL
-    redis_client.set_session_data(session_id, payload, ttl_in_seconds=300)
+        return {"message": "No session ID provided."}
 
-    return {
-        "message": "JSON payload successfully stored in session.",
-        "session_id": session_id
-    }
+    # Get the session data from Redis
+    session_data = redis_client.get_session_data(session_id)
+    if not session_data:
+        return {"message": "Session expired or not found."}
+    
+    print("Session data:", session_data)
+
+    return {"file_name": session_data}
 
 @router.get("/current-session")
 async def get_session(
