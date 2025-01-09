@@ -103,14 +103,13 @@ class S3:
             if await self.file_exists(filename):
                 filename = await self.get_unique_filename(filename)
 
-            file_id = str(uuid.uuid4())
-            s3_key = f"uploads/{session_id}/{file_id}_{filename}"
+            s3_key = f"uploads/{session_id}/{filename}"
 
             await asyncio.to_thread(
                 self.client.upload_fileobj,
                 file.file,
                 self.bucket_name,
-                filename,
+                s3_key,
                 ExtraArgs=extra_args,
             )
 

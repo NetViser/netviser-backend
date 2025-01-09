@@ -1,11 +1,12 @@
 import uuid
 from app.services.redis_service import RedisClient
-from fastapi import APIRouter, File, Response, UploadFile, Cookie, Body
+from fastapi import APIRouter, File, Response, UploadFile, Cookie, Body, Depends
 from typing import Dict, Any, Optional
 from app.configs.config import get_settings
 import xgboost as xgb
 import pandas as pd
 import os
+from app.services.s3_service import S3
 
 router = APIRouter(prefix="/api", tags=["api"])
 settings = get_settings()
@@ -33,11 +34,32 @@ SESSION_COOKIE_NAME = "session_id"
 # Instantiate our singleton Redis client once
 redis_client = RedisClient()
 
+@router.post("/upload")
+async def upload_file(
+    session_id: Optional[str] = Cookie(None),
+    file: UploadFile = File(...),
+    s3_service: S3 = Depends(S3),
+):
+    """
+    Store file in S3
+    """
+    if not session_id:
+        raise ValueError("missing session id")
+    
+    if not file:
+        raise ValueError("file missing")
+
+    try:
+        await s3_service.upload(file, file.filename, session_id)
+    except Exception as e:
+        return e
+
+
 @router.post("/store-json")
 async def store_json(
     response: Response,
     session_id: Optional[str] = Cookie(None),
-    payload: Dict[str, Any] = Body(...)
+    payload: Dict[str, Any] = Body(...),
 ):
     """
     Stores the provided JSON payload in a Redis session. 
