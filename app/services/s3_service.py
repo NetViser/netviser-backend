@@ -5,11 +5,16 @@ import boto3
 from botocore.exceptions import ClientError
 from fastapi import Cookie, HTTPException, UploadFile
 import asyncio
+from boto3.s3.transfer import TransferConfig
+from concurrent.futures import ThreadPoolExecutor
 
 from app.configs.config import get_settings
 
 
 settings = get_settings()
+
+# Initialize a custom ThreadPoolExecutor
+executor = ThreadPoolExecutor(max_workers=20, thread_name_prefix="s3-upload-")
 
 
 class S3:
@@ -49,6 +54,15 @@ class S3:
             aws_secret_access_key=secret_access_key,
         )
 
+        # Configure TransferConfig for multipart uploads
+        self.transfer_config = TransferConfig(
+            multipart_threshold=100 * 1024 * 1024,  # 100 MB
+            multipart_chunksize=50 * 1024 * 1024,   # 50 MB
+            max_concurrency=10,
+            use_threads=True,
+            # Adjust as needed
+        )
+
     async def read(self, filename: str) -> bytes:
         """Download a file from S3."""
         buffer = BytesIO()
@@ -59,7 +73,7 @@ class S3:
             buffer.seek(0)
             return buffer.read()
         except ClientError as e:
-            raise e
+            raise HTTPException(status_code=404, detail="File not found in S3.") from e
 
     async def generate_presigned_url(
         self,
@@ -76,13 +90,14 @@ class S3:
         s3_key = f"uploads/{session_id}/{file_id}_{filename}"
 
         try:
-            return self.client.generate_presigned_url(
-                "get_object",
+            presigned_url = self.client.generate_presigned_url(
+                "put_object",
                 Params={"Bucket": self.bucket_name, "Key": s3_key},
                 ExpiresIn=expiration,
             )
+            return presigned_url
         except ClientError as e:
-            raise e
+            raise HTTPException(status_code=500, detail="Failed to generate presigned URL.") from e
 
     async def upload(
         self,
@@ -98,29 +113,31 @@ class S3:
             filename (str): Key to save the file as in S3.
             extra_args (dict, optional): Additional S3 arguments like ACL or ContentType.
         """
-        try:
-            # Check if the file already exists in S3
-            if await self.file_exists(filename):
-                filename = await self.get_unique_filename(filename)
+        if not session_id:
+            raise HTTPException(status_code=400, detail="Session ID missing")
 
+        try:
+            # Generate a unique S3 key
             s3_key = f"uploads/{session_id}/{filename}"
 
+            # Upload the file to S3 using multipart upload
             await asyncio.to_thread(
                 self.client.upload_fileobj,
                 file.file,
                 self.bucket_name,
                 s3_key,
                 ExtraArgs=extra_args,
+                Config=self.transfer_config,
             )
 
             return {
                 "filename": filename,
-                "file_path": f"https://{self.bucket_name}-buckets.s3.{self.region_name}.amazonaws.com/"
-                + s3_key,
+                "s3_key": s3_key,
+                "file_path": f"https://{self.bucket_name}.s3.{self.region_name}.amazonaws.com/{s3_key}",
                 "extra_args": extra_args,
             }
         except ClientError as e:
-            raise e
+            raise HTTPException(status_code=500, detail="Failed to upload file to S3.") from e
 
     async def file_exists(self, filename: str) -> bool:
         """Check if a file exists in the S3 bucket."""
@@ -132,7 +149,7 @@ class S3:
             )
             return "Contents" in response
         except ClientError as e:
-            raise e
+            raise HTTPException(status_code=500, detail="Error checking file existence in S3.") from e
 
     async def get_unique_filename(self, filename: str) -> str:
         """Generate a unique filename if a file with the same name exists."""
@@ -157,4 +174,4 @@ class S3:
                 self.client.delete_object, Bucket=self.bucket_name, Key=filename
             )
         except ClientError as e:
-            raise e
+            raise HTTPException(status_code=500, detail="Failed to delete file from S3.") from e

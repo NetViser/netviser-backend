@@ -36,6 +36,7 @@ redis_client = RedisClient()
 
 @router.post("/upload")
 async def upload_file(
+    response: Response,
     session_id: Optional[str] = Cookie(None),
     file: UploadFile = File(...),
     s3_service: S3 = Depends(S3),
@@ -43,14 +44,27 @@ async def upload_file(
     """
     Store file in S3
     """
-    if not session_id:
-        raise ValueError("missing session id")
-    
     if not file:
         raise ValueError("file missing")
 
+    if not session_id:
+        # If the user doesn't have a session_id, create a new one
+        session_id = str(uuid.uuid4())
+        # Set the cookie with a 5-minute expiration
+        response.set_cookie(key=SESSION_COOKIE_NAME, value=session_id, max_age=300)
+
     try:
-        await s3_service.upload(file, file.filename, session_id)
+        upload_output = await s3_service.upload(file, file.filename, session_id)
+        s3_key = upload_output.get("s3_key")
+        print(f"File uploaded to S3 with key: {s3_key}")
+            
+        # Store or update the session data in Redis with a 5-minute TTL
+        redis_client.set_session_data(session_id, s3_key, ttl_in_seconds=300)
+        return {
+            "message": "JSON payload successfully stored in session.",
+            "session_id": session_id
+        }
+
     except Exception as e:
         return e
 
