@@ -43,9 +43,12 @@ async def store_json(
     Stores the provided JSON payload in a Redis session. 
     If there is no existing session_id, a new one is created.
     """
+    print("Payload:", payload, "Session ID:", session_id)
     if not session_id:
+        print(">> No session ID found.")
         # If the user doesn't have a session_id, create a new one
         session_id = str(uuid.uuid4())
+        print(">> Session ID:", session_id)
         # Set the cookie with a 5-minute expiration
         response.set_cookie(key=SESSION_COOKIE_NAME, value=session_id, max_age=300)
     

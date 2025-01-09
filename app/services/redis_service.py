@@ -22,12 +22,12 @@ class RedisClient:
 
     def initialize_client(self):
         """Initialize the Redis client."""
+        credential_provider = redis.UsernamePasswordCredentialProvider(settings.REDIS_USERNAME, settings.REDIS_PASSWORD)
         self.client = redis.Redis(
             host=settings.REDIS_HOST,
             port=settings.REDIS_PORT,
             decode_responses=True,
-            username=settings.REDIS_USERNAME,
-            password=settings.REDIS_PASSWORD,
+            credential_provider=credential_provider 
         )
 
     def set_session_data(
