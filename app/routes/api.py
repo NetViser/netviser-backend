@@ -1,11 +1,16 @@
+import io
 import uuid
+
+from fastapi.responses import JSONResponse
+import numpy as np
 from app.services.redis_service import RedisClient
-from fastapi import APIRouter, File, Response, UploadFile, Cookie, Body, Depends
-from typing import Dict, Any, Optional
+from fastapi import APIRouter, File, Response, UploadFile, Cookie, Depends
+from typing import Optional
 from app.configs.config import get_settings
 import xgboost as xgb
 import pandas as pd
 import os
+import joblib
 from app.services.s3_service import S3
 
 router = APIRouter(prefix="/api", tags=["api"])
@@ -16,23 +21,43 @@ settings = get_settings()
 async def predict(
     file: UploadFile = File(...),
 ):
+    # Read and process the uploaded file
     converted_file = pd.read_csv(file.file, engine="pyarrow", dtype_backend="pyarrow")
-
     X_test_scaled_array = converted_file.values
     dmatrix = xgb.DMatrix(X_test_scaled_array)
 
+    # Load the pre-trained XGBoost model
     model = xgb.Booster()
     load_model = os.path.join("model", "xgb_booster.model")
     model.load_model(load_model)
+
+    # Make predictions
     predictions = model.predict(dmatrix)
-    print(predictions)
-    return {"file_name": file.filename}
+    predictions_y = np.argmax(predictions, axis=1)
+    pickle_file_path = "model\label_encoder.pkl"
+
+    encoder = joblib.load(pickle_file_path)
+
+    print(encoder.classes_)
+
+    og_class = encoder.inverse_transform(predictions_y)
+
+    print(og_class)
+
+    converted_file["class"] = og_class
+
+    return JSONResponse(
+        content=converted_file.head(1000).to_json(orient="records"),
+        media_type="application/json",
+    )
+
 
 # Since we don't have real login, we'll store a custom "session_id" in a cookie
 SESSION_COOKIE_NAME = "session_id"
 
 # Instantiate our singleton Redis client once
 redis_client = RedisClient()
+
 
 @router.post("/upload")
 async def upload_file(
@@ -54,24 +79,58 @@ async def upload_file(
         response.set_cookie(key=SESSION_COOKIE_NAME, value=session_id, max_age=300)
 
     try:
-        upload_output = await s3_service.upload(file, file.filename, session_id)
+        print("Reading and processing the uploaded file...")
+        converted_file = pd.read_csv(
+            file.file, engine="pyarrow", dtype_backend="pyarrow"
+        )
+        X_test_scaled_array = converted_file.values
+        dmatrix = xgb.DMatrix(X_test_scaled_array)
+
+        # Load the pre-trained XGBoost model
+        model = xgb.Booster()
+        load_model = os.path.join("model", "xgb_booster.model")
+        model.load_model(load_model)
+
+        # Make predictions
+        predictions = model.predict(dmatrix)
+        predictions_y = np.argmax(predictions, axis=1)
+        pickle_file_path = "model\label_encoder.pkl"
+
+        encoder = joblib.load(pickle_file_path)
+
+        og_class = encoder.inverse_transform(predictions_y)
+
+        converted_file["class"] = og_class
+
+        # Convert DataFrame to a CSV in-memory
+        buffer = io.BytesIO()
+        converted_file.to_csv(buffer, index=False)
+        buffer.seek(0)
+
+        # Convert the in-memory CSV back to a file-like object for S3 upload
+        csv_file = UploadFile(
+            filename=f"{file.filename}_processed.csv",
+            file=buffer,
+        )
+
+        upload_output = await s3_service.upload(csv_file, csv_file.filename, session_id)
         s3_key = upload_output.get("s3_key")
         print(f"File uploaded to S3 with key: {s3_key}")
-            
+
         # Store or update the session data in Redis with a 5-minute TTL
         redis_client.set_session_data(session_id, s3_key, ttl_in_seconds=300)
+        print("Session data stored in Redis.")
         return {
             "message": "JSON payload successfully stored in session.",
-            "session_id": session_id
+            "session_id": session_id,
         }
 
     except Exception as e:
         return e
 
+
 @router.get("/get-file-name")
-async def get_file_name(
-    session_id: str = Cookie(None)
-):
+async def get_file_name(session_id: str = Cookie(None)):
     """
     Retrieve the file name or value pair stored in the session data based on the session_id.
     """
@@ -82,15 +141,14 @@ async def get_file_name(
     session_data = redis_client.get_session_data(session_id)
     if not session_data:
         return {"message": "Session expired or not found."}
-    
+
     print("Session data:", session_data)
 
     return {"file_name": session_data}
 
+
 @router.get("/current-session")
-async def get_session(
-    session_id: str = Cookie(None)
-):
+async def get_session(session_id: str = Cookie(None)):
     if not session_id:
         return {"message": "No session found"}
     data = redis_client.get_session_data(session_id)
@@ -100,10 +158,7 @@ async def get_session(
 
 
 @router.post("/end-session")
-async def end_session(
-    session_id: str = Cookie(None),
-    response: Response = None
-):
+async def end_session(session_id: str = Cookie(None), response: Response = None):
     if session_id:
         redis_client.delete_session_data(session_id)
         # Optionally clear the cookie
