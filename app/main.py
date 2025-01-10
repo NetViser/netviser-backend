@@ -1,12 +1,27 @@
 import importlib
 import os
 from fastapi import APIRouter, FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
 
+origins = [
+    "http://localhost:3000",  # Frontend URL
+    # Add other origins if necessary
+]
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],  # Allow all HTTP methods
+    allow_headers=["*"],  # Allow all headers
+)
+
 hide_router = ["_init.py"]
 
-# for automatic route registration
+# For automatic route registration
 route_files = [file for file in os.listdir("app/routes") if file.endswith(".py")]
 for file in route_files:
     if file in hide_router:
@@ -20,4 +35,4 @@ for file in route_files:
 
 @app.get("/")
 async def root():
-    return {"message": "Healtcheck Passed"}
+    return {"message": "Healthcheck Passed"}

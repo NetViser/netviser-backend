@@ -13,6 +13,8 @@ class Settings(BaseSettings):
     REDIS_USERNAME: Optional[str] = None
     REDIS_PASSWORD: Optional[str] = None
 
+    STAGE: Optional[str] = None
+
     model_config = SettingsConfigDict(env_file=".env")
 
 

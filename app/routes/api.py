@@ -76,7 +76,14 @@ async def upload_file(
         # If the user doesn't have a session_id, create a new one
         session_id = str(uuid.uuid4())
         # Set the cookie with a 5-minute expiration
-        response.set_cookie(key=SESSION_COOKIE_NAME, value=session_id, max_age=300)
+        response.set_cookie(
+            key=SESSION_COOKIE_NAME,
+            value=session_id,
+            max_age=300,
+            httponly=True,      # Prevents JavaScript access
+            secure=(False if settings.STAGE == "local" else True),      # Set to True in production
+            samesite="lax",     # Adjust as needed
+        )
 
     try:
         print("Reading and processing the uploaded file...")
@@ -118,7 +125,7 @@ async def upload_file(
         print(f"File uploaded to S3 with key: {s3_key}")
 
         # Store or update the session data in Redis with a 5-minute TTL
-        redis_client.set_session_data(session_id, s3_key, ttl_in_seconds=300)
+        redis_client.set_session_data(session_id, s3_key, ttl_in_seconds=600)
         print("Session data stored in Redis.")
         return {
             "message": "JSON payload successfully stored in session.",
@@ -126,8 +133,58 @@ async def upload_file(
         }
 
     except Exception as e:
-        return e
+        return {
+            "message": "Failed to process the uploaded file.",
+        }
 
+@router.post("/raw-file-upload")
+async def raw_file_upload(
+    response: Response,
+    session_id: Optional[str] = Cookie(None),
+    file: UploadFile = File(...),
+    s3_service: S3 = Depends(S3),
+):
+    """
+    Store the raw file in S3
+    """
+    if not file:
+        raise ValueError("file missing")
+    
+
+    if not session_id:
+        print("No session ID found.")
+        # If the user doesn't have a session_id, create a new one
+        session_id = str(uuid.uuid4())
+        # Set the cookie with a 5-minute expiration
+        print("New session ID created:", session_id)
+        response.set_cookie(
+            key=SESSION_COOKIE_NAME,
+            value=session_id,
+            max_age=300,
+            httponly=True,      # Prevents JavaScript access
+            secure=(False if settings.STAGE == "local" else True),  
+            samesite="lax",     # Adjust as needed
+        )
+
+
+    try:
+        # Upload the raw file to S3
+        upload_output = await s3_service.upload(file, file.filename, session_id)
+        s3_key = upload_output.get("s3_key")
+        print(f"File uploaded to S3 with key: {s3_key}")
+
+        # Store or update the session data in Redis with a 5-minute TTL
+        redis_client.set_session_data(session_id, s3_key, ttl_in_seconds=600)
+        print("Session data stored in Redis.")
+        return {
+            "message": "File successfully stored in session.",
+            "session_id": session_id,
+        }
+
+    except Exception as e:
+        return {
+            "message": "Failed to process the uploaded file.",
+        }
 
 @router.get("/get-file-name")
 async def get_file_name(session_id: str = Cookie(None)):
@@ -135,12 +192,12 @@ async def get_file_name(session_id: str = Cookie(None)):
     Retrieve the file name or value pair stored in the session data based on the session_id.
     """
     if not session_id:
-        return {"message": "No session ID provided."}
+        return Response(status_code=400, content="Session ID missing")
 
     # Get the session data from Redis
     session_data = redis_client.get_session_data(session_id)
     if not session_data:
-        return {"message": "Session expired or not found."}
+        return Response(status_code=400, content="Session Expired or not found")
 
     print("Session data:", session_data)
 
