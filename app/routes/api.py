@@ -1,7 +1,6 @@
 import io
 import uuid
 
-from fastapi.responses import JSONResponse
 import numpy as np
 from app.services.redis_service import RedisClient
 from fastapi import APIRouter, File, Response, UploadFile, Cookie, Depends
@@ -15,42 +14,6 @@ from app.services.s3_service import S3
 
 router = APIRouter(prefix="/api", tags=["api"])
 settings = get_settings()
-
-
-@router.post("/predict")
-async def predict(
-    file: UploadFile = File(...),
-):
-    # Read and process the uploaded file
-    converted_file = pd.read_csv(file.file, engine="pyarrow", dtype_backend="pyarrow")
-    X_test_scaled_array = converted_file.values
-    dmatrix = xgb.DMatrix(X_test_scaled_array)
-
-    # Load the pre-trained XGBoost model
-    model = xgb.Booster()
-    load_model = os.path.join("model", "xgb_booster.model")
-    model.load_model(load_model)
-
-    # Make predictions
-    predictions = model.predict(dmatrix)
-    predictions_y = np.argmax(predictions, axis=1)
-    pickle_file_path = "model\label_encoder.pkl"
-
-    encoder = joblib.load(pickle_file_path)
-
-    print(encoder.classes_)
-
-    og_class = encoder.inverse_transform(predictions_y)
-
-    print(og_class)
-
-    converted_file["class"] = og_class
-
-    return JSONResponse(
-        content=converted_file.head(1000).to_json(orient="records"),
-        media_type="application/json",
-    )
-
 
 # Since we don't have real login, we'll store a custom "session_id" in a cookie
 SESSION_COOKIE_NAME = "session_id"
