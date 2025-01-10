@@ -4,7 +4,7 @@ import uuid
 from fastapi.responses import JSONResponse
 import numpy as np
 from app.services.redis_service import RedisClient
-from fastapi import APIRouter, File, Response, UploadFile, Cookie, Depends
+from fastapi import APIRouter, File, HTTPException, Response, UploadFile, Cookie, Depends
 from typing import Optional
 from app.configs.config import get_settings
 import xgboost as xgb
@@ -186,8 +186,27 @@ async def raw_file_upload(
             "message": "Failed to process the uploaded file.",
         }
 
+SESSION_COOKIE_NAME = "session_id"
+
+def get_session_id(session_id: Optional[str] = Cookie(None)) -> str:
+    """
+    Dependency to extract the session_id from HTTP-only cookies.
+
+    Raises:
+        HTTPException: If the session_id cookie is missing.
+
+    Returns:
+        str: The extracted session_id.
+    """
+    if not session_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Session ID missing. Please log in.",
+        )
+    return session_id
+
 @router.get("/get-file-name")
-async def get_file_name(session_id: str = Cookie(None)):
+async def get_file_name(session_id: str = Depends(get_session_id)):
     """
     Retrieve the file name or value pair stored in the session data based on the session_id.
     """
