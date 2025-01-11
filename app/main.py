@@ -3,8 +3,6 @@ import os
 from fastapi import APIRouter, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.middleware.session_middleware import SessionMiddleware
-
 app = FastAPI()
 
 origins = [
@@ -22,9 +20,6 @@ app.add_middleware(
 )
 
 hide_router = ["_init.py"]
-
-# Add Session Middleware
-app.add_middleware(SessionMiddleware)
 
 # For automatic route registration
 route_files = [file for file in os.listdir("app/routes") if file.endswith(".py")]
