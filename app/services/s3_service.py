@@ -57,18 +57,18 @@ class S3:
         # Configure TransferConfig for multipart uploads
         self.transfer_config = TransferConfig(
             multipart_threshold=100 * 1024 * 1024,  # 100 MB
-            multipart_chunksize=50 * 1024 * 1024,   # 50 MB
+            multipart_chunksize=50 * 1024 * 1024,  # 50 MB
             max_concurrency=10,
             use_threads=True,
             # Adjust as needed
         )
 
-    async def read(self, filename: str) -> bytes:
+    async def read(self, s3_key: str) -> bytes:
         """Download a file from S3."""
         buffer = BytesIO()
         try:
             await asyncio.to_thread(
-                self.client.download_fileobj, self.bucket_name, filename, buffer
+                self.client.download_fileobj, self.bucket_name, s3_key, buffer
             )
             buffer.seek(0)
             return buffer.read()
@@ -97,7 +97,9 @@ class S3:
             )
             return presigned_url
         except ClientError as e:
-            raise HTTPException(status_code=500, detail="Failed to generate presigned URL.") from e
+            raise HTTPException(
+                status_code=500, detail="Failed to generate presigned URL."
+            ) from e
 
     async def upload(
         self,
@@ -137,7 +139,9 @@ class S3:
                 "extra_args": extra_args,
             }
         except ClientError as e:
-            raise HTTPException(status_code=500, detail="Failed to upload file to S3.") from e
+            raise HTTPException(
+                status_code=500, detail="Failed to upload file to S3."
+            ) from e
 
     async def file_exists(self, filename: str) -> bool:
         """Check if a file exists in the S3 bucket."""
@@ -149,7 +153,9 @@ class S3:
             )
             return "Contents" in response
         except ClientError as e:
-            raise HTTPException(status_code=500, detail="Error checking file existence in S3.") from e
+            raise HTTPException(
+                status_code=500, detail="Error checking file existence in S3."
+            ) from e
 
     async def get_unique_filename(self, filename: str) -> str:
         """Generate a unique filename if a file with the same name exists."""
@@ -174,4 +180,6 @@ class S3:
                 self.client.delete_object, Bucket=self.bucket_name, Key=filename
             )
         except ClientError as e:
-            raise HTTPException(status_code=500, detail="Failed to delete file from S3.") from e
+            raise HTTPException(
+                status_code=500, detail="Failed to delete file from S3."
+            ) from e
