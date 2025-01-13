@@ -325,7 +325,7 @@ async def raw_file_upload(
         print(f"File uploaded to S3 with key: {s3_key}")
 
         # Store or update the session data in Redis with a 5-minute TTL
-        redis_client.set_session_data(session_id, s3_key, ttl_in_seconds=600)
+        redis_client.set_session_data(session_id, s3_key, ttl_in_seconds=60)
         print("Session data stored in Redis.")
         return {
             "message": "File successfully stored in session.",
@@ -340,7 +340,7 @@ async def raw_file_upload(
 
 
 @router.get("/get-file-name")
-async def get_file_name(session_id: str = Cookie(None)):
+async def get_file_name(session_id: str = Depends(get_session_id)):
     """
     Retrieve the file name or value pair stored in the session data based on the session_id.
     """
