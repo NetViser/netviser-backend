@@ -4,7 +4,6 @@ import uuid
 
 from fastapi.responses import JSONResponse
 import numpy as np
-import pickle
 from app.services.redis_service import RedisClient
 from fastapi import (
     APIRouter,
@@ -88,13 +87,10 @@ async def get_dashboard(
 
         file_like_object = io.BytesIO(file_data)
 
-        print("Reading and processing the uploaded file...")
         data_frame = pd.read_csv(
             file_like_object, engine="pyarrow", dtype_backend="pyarrow"
         )
 
-        print("Data frame shape:", data_frame.shape)
-        print("Data frame columns:", data_frame.columns)
         total_rows = len(data_frame)
 
         if "Label" in data_frame.columns:
@@ -127,46 +123,37 @@ async def get_dashboard(
 
         protocol_distribution = Counter(data_frame["Protocol"])
 
-        label_distribution = Counter(data_frame["class"])
+        label_distribution = Counter(data_frame["Label"])
 
         src_port_distribution_json = dict(src_port_distribution)
         dst_port_distribution_json = dict(dst_port_distribution)
         protocol_distribution_json = dict(protocol_distribution)
 
-        print(
-            "Session data:",
-            session_data,
-            "Src Port distribution",
-            src_port_distribution_json,
-            "Dst Port distribution",
-            dst_port_distribution_json,
-            "Protocol distribution",
-            protocol_distribution_json,
-            "Label distribution",
-            label_distribution,
-            "Flow Bytes/s",
-            flow_bytes_per_second_series,
-        )
+        # print(
+        #     "Session data:",
+        #     session_data,
+        #     "Src Port distribution",
+        #     src_port_distribution_json,
+        #     "Dst Port distribution",
+        #     dst_port_distribution_json,
+        #     "Protocol distribution",
+        #     protocol_distribution_json,
+        #     "Label distribution",
+        #     label_distribution,
+        #     "Flow Bytes/s",
+        #     flow_bytes_per_second_series,
+        # )
 
         return {
-            "Session data:",
-            session_data,
-            "total_rows",
-            total_rows,
-            "attack_rows",
-            non_benign_count,
-            "detected_attack_type",
-            unique_attacks,
-            "Src Port distribution",
-            src_port_distribution_json,
-            "Dst Port distribution",
-            dst_port_distribution_json,
-            "Protocol distribution",
-            protocol_distribution_json,
-            "Label distribution",
-            label_distribution,
-            "Flow Bytes/s",
-            flow_bytes_per_second_series,
+            "Session data:": session_data,
+            "total_rows": total_rows,
+            "attack_rows": non_benign_count,
+            "detected_attack_type": unique_attacks,
+            "Src Port distribution": src_port_distribution_json,
+            "Dst Port distribution": dst_port_distribution_json,
+            "Protocol distribution": protocol_distribution_json,
+            "Label distribution": label_distribution,
+            "Flow Bytes/s": flow_bytes_per_second_series,
         }
     except Exception as e:
         print(e)
@@ -186,25 +173,30 @@ async def upload_file(
 
     # 1. Validate input file
     if not file:
-        raise HTTPException(status_code=400, detail="File is missing.")
+        raise ValueError("file missing")
 
-    # 2. Check or create session_id
     if not session_id:
+        # If the user doesn't have a session_id, create a new one
         session_id = str(uuid.uuid4())
-        # Set the cookie with a 60-minute expiration (adjust as needed)
+        # Set the cookie with a 5-minute expiration
         response.set_cookie(
             key=SESSION_COOKIE_NAME,
             value=session_id,
-            max_age=60 * 60,
+            max_age=300,
             httponly=True,  # Prevents JavaScript access
-            secure=False,
-            samesite="lax",
+            secure=(
+                False if settings.STAGE == "local" else True
+            ),  # Set to True in production
+            samesite="lax",  # Adjust as needed
         )
 
     try:
-        print("Reading and processing the uploaded file...")
         # 3. Read CSV into a pandas DataFrame
         df = pd.read_csv(file.file, engine="pyarrow", dtype_backend="pyarrow")
+
+        meta_columns = ["Flow ID", "Timestamp", "Src IP", "Dst IP"]
+        # Make a copy to avoid altering these columns inadvertently
+        meta_df = df[meta_columns].copy()
 
         # 4. Drop irrelevant columns
         irrelevant_columns = [
@@ -231,8 +223,6 @@ async def upload_file(
         scaler_path = os.path.join("model", "scaler.pkl")
         scaler = joblib.load(scaler_path)
 
-        print("Scaler loaded successfully.")
-
         # 7. Define features and transform
         feature_cols = [
             "Src Port",
@@ -253,9 +243,7 @@ async def upload_file(
         # 8. Predict classes
         #    If your model outputs class probabilities (shape [n_samples, n_classes]),
         #    then np.argmax along axis=1 is the typical way to get the class index.
-        print("GAY1")
         predictions = model.predict(dmatrix)
-        print("GAY2")
         predicted_indices = np.argmax(predictions, axis=1)
 
         # 9. Decode labels back to their string form
@@ -264,16 +252,17 @@ async def upload_file(
         decoded_labels = label_encoder.inverse_transform(predicted_indices)
 
         df["Label"] = decoded_labels
+        df = pd.concat([meta_df, df], axis=1)
 
         # 10. Convert the DataFrame to a pickle in memory
         buffer = io.BytesIO()
-        pickle.dump(df, buffer)
+        df.to_csv(buffer, index=False)
         buffer.seek(0)
 
         # 11. Create an UploadFile-like object for S3 upload
         #     We'll call this `processed_file` instead of `csv_file`
         processed_file = UploadFile(
-            filename=f"{file.filename}_processed.pkl", file=buffer
+            filename=f"{file.filename}_processed.csv", file=buffer
         )
 
         # 12. Upload the pickle file to S3
@@ -281,20 +270,18 @@ async def upload_file(
             processed_file, processed_file.filename, session_id
         )
         s3_key = upload_output.get("s3_key")
-        print(f"File uploaded to S3 with key: {s3_key}")
 
         # 13. Store or update the session data in Redis with a 10-minute TTL
         redis_client.set_session_data(session_id, s3_key, ttl_in_seconds=600)
-        print("Session data stored in Redis.")
 
-        return JSONResponse(
-            content={
+        return {
+            "content": {
                 "message": "DataFrame successfully processed and stored in session.",
                 "session_id": session_id,
                 "s3_key": s3_key,
             },
-            status_code=200,
-        )
+            "status_code": 200,
+        }
 
     except Exception as e:
         print(f"An error occurred while processing the file: {e}")
