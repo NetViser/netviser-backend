@@ -30,7 +30,6 @@ SESSION_COOKIE_NAME = "session_id"
 # Instantiate our singleton Redis client once
 redis_client = RedisClient()
 
-
 @router.get("/dashboard")
 async def get_dashboard(
     session_id: Optional[str] = Cookie(None),
@@ -50,78 +49,83 @@ async def get_dashboard(
 
         file_like_object = io.BytesIO(file_data)
 
+        # Read CSV with PyArrow engine
         data_frame = pd.read_csv(
-            file_like_object, engine="pyarrow", dtype_backend="pyarrow"
+            file_like_object,
+            engine="pyarrow",
+            dtype_backend="pyarrow"
         )
 
         total_rows = len(data_frame)
 
-        if "Label" in data_frame.columns:
-            benign_count = data_frame[data_frame["Label"] == "Benign"].shape[0]
-            non_benign_count = total_rows - benign_count
-            unique_attacks = (
-                data_frame[data_frame["Label"] != "Benign"]["Label"].unique().tolist()
-            )
-        else:
+        # Ensure 'Label' and 'Timestamp' columns exist
+        if "Label" not in data_frame.columns:
             return Response(
                 status_code=400, content="Label column missing in the dataset"
             )
 
-        if "Timestamp" in data_frame.columns:
-            data_frame["Timestamp"] = pd.to_datetime(data_frame["Timestamp"])
-            data_frame.sort_values(by="Timestamp", inplace=True)
-
-            flow_bytes_per_second_series = (
-                data_frame[["Timestamp", "Flow Bytes/s"]]
-                .dropna()
-                .to_dict(orient="records")
-            )
-        else:
+        if "Timestamp" not in data_frame.columns:
             return Response(
                 status_code=400, content="Timestamp column missing in the dataset"
             )
 
+        # Convert Timestamp to datetime and sort
+        data_frame["Timestamp"] = pd.to_datetime(data_frame["Timestamp"])
+        data_frame.sort_values(by="Timestamp", inplace=True)
+
+        # For the dashboard
+        benign_count = data_frame[data_frame["Label"] == "BENIGN"].shape[0]
+        non_benign_count = total_rows - benign_count
+        unique_attacks = (
+            data_frame[data_frame["Label"] != "BENIGN"]["Label"].unique().tolist()
+        )
+
+        # 1) Resample Flow Bytes/s to 1-second intervals using mean
+        #    - set index as Timestamp
+        data_frame.set_index("Timestamp", inplace=True)
+
+        # rename Flow Bytes/s to flow_bytes/s
+        data_frame.rename(columns={"Flow Bytes/s": "flow_bytes/s"}, inplace=True)
+
+        #    - resample by 1 second and calculate mean for Flow Bytes/s
+        flow_bytes_resampled = (
+            data_frame["flow_bytes/s"]
+            .resample("1S")
+            .mean()
+            .reset_index()
+        )
+
+        if flow_bytes_resampled.columns[0] != "Timestamp":
+            flow_bytes_resampled.rename(columns={flow_bytes_resampled.columns[0]: 'Timestamp'}, inplace=True)
+
+
+
+        # 2) Convert back to dict for JSON response
+        flow_bytes_per_second_series = flow_bytes_resampled.dropna().to_dict(orient="records")
+
+        # Other distributions
         src_port_distribution = Counter(data_frame["Src Port"])
         dst_port_distribution = Counter(data_frame["Dst Port"])
-
         protocol_distribution = Counter(data_frame["Protocol"])
-
         label_distribution = Counter(data_frame["Label"])
 
-        src_port_distribution_json = dict(src_port_distribution)
-        dst_port_distribution_json = dict(dst_port_distribution)
-        protocol_distribution_json = dict(protocol_distribution)
-
-        # print(
-        #     "Session data:",
-        #     session_data,
-        #     "Src Port distribution",
-        #     src_port_distribution_json,
-        #     "Dst Port distribution",
-        #     dst_port_distribution_json,
-        #     "Protocol distribution",
-        #     protocol_distribution_json,
-        #     "Label distribution",
-        #     label_distribution,
-        #     "Flow Bytes/s",
-        #     flow_bytes_per_second_series,
-        # )
+        # Convert index back so subsequent calls to e.g. data_frame[“Label”] still work
+        data_frame.reset_index(inplace=True)
 
         return {
-            "Session data:": session_data,
+            "file_name": session_data,
             "total_rows": total_rows,
-            "attack_rows": non_benign_count,
-            "detected_attack_type": unique_attacks,
-            "Src Port distribution": src_port_distribution_json,
-            "Dst Port distribution": dst_port_distribution_json,
-            "Protocol distribution": protocol_distribution_json,
-            "Label distribution": label_distribution,
-            "Flow Bytes/s": flow_bytes_per_second_series,
+            "total_detected_attacks": non_benign_count,
+            "detected_attack_types": unique_attacks,
+            "src_port_distribution": dict(src_port_distribution),
+            "dst_port_distribution": dict(dst_port_distribution),
+            "protocol_distribution": dict(protocol_distribution),
+            "class_distribution": label_distribution,
+            "flow_bytes/s": flow_bytes_per_second_series,
         }
     except Exception as e:
         print(e)
         return Response(status_code=400, content="Failed to retrieve dashboard.")
-
 
 @router.post("/upload")
 async def upload_file(
@@ -145,7 +149,7 @@ async def upload_file(
         response.set_cookie(
             key=SESSION_COOKIE_NAME,
             value=session_id,
-            max_age=300,
+            max_age=43200,
             httponly=True,  # Prevents JavaScript access
             secure=(
                 False if settings.STAGE == "local" else True
@@ -235,7 +239,7 @@ async def upload_file(
         s3_key = upload_output.get("s3_key")
 
         # 13. Store or update the session data in Redis with a 10-minute TTL
-        redis_client.set_session_data(session_id, s3_key, ttl_in_seconds=600)
+        redis_client.set_session_data(session_id, s3_key, ttl_in_seconds=43200)
 
         return {
             "content": {
@@ -289,7 +293,7 @@ async def raw_file_upload(
         print(f"File uploaded to S3 with key: {s3_key}")
 
         # Store or update the session data in Redis with a 5-minute TTL
-        redis_client.set_session_data(session_id, s3_key, ttl_in_seconds=60)
+        redis_client.set_session_data(session_id, s3_key, ttl_in_seconds=19960)
         print("Session data stored in Redis.")
         return {
             "message": "File successfully stored in session.",
