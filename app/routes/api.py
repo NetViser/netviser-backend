@@ -95,10 +95,8 @@ async def get_dashboard(
             .reset_index()
         )
 
-        if flow_bytes_resampled.columns[0] != "Timestamp":
-            flow_bytes_resampled.rename(columns={flow_bytes_resampled.columns[0]: 'Timestamp'}, inplace=True)
-
-
+        if flow_bytes_resampled.columns[0] != "timestamp":
+            flow_bytes_resampled.rename(columns={flow_bytes_resampled.columns[0]: 'timestamp'}, inplace=True)
 
         # 2) Convert back to dict for JSON response
         flow_bytes_per_second_series = flow_bytes_resampled.dropna().to_dict(orient="records")
@@ -107,6 +105,7 @@ async def get_dashboard(
         src_port_distribution = Counter(data_frame["Src Port"])
         dst_port_distribution = Counter(data_frame["Dst Port"])
         protocol_distribution = Counter(data_frame["Protocol"])
+        src_ip_address_distribution = Counter(data_frame["Src IP"])
         label_distribution = Counter(data_frame["Label"])
 
         # Convert index back so subsequent calls to e.g. data_frame[“Label”] still work
@@ -120,6 +119,7 @@ async def get_dashboard(
             "src_port_distribution": dict(src_port_distribution),
             "dst_port_distribution": dict(dst_port_distribution),
             "protocol_distribution": dict(protocol_distribution),
+            "src_ip_address_distribution": dict(src_ip_address_distribution),
             "class_distribution": label_distribution,
             "flow_bytes/s": flow_bytes_per_second_series,
         }
