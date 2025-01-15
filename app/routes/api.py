@@ -272,7 +272,7 @@ async def raw_file_upload(
         session_id = str(uuid.uuid4())
         # Set the cookie with a 5-minute expiration
         print("New session ID created:", session_id)
-        await response.set_cookie(
+        response.set_cookie(
             key=SESSION_COOKIE_NAME,
             value=session_id,
             max_age=300,
@@ -284,7 +284,8 @@ async def raw_file_upload(
     try:
         # Upload the raw file to S3
         upload_output = await s3_service.upload(file, file.filename, session_id)
-        s3_key = await upload_output.get("s3_key")
+        print("upload output:", upload_output)
+        s3_key = upload_output.get("s3_key")
         print(f"File uploaded to S3 with key: {s3_key}")
 
         # Store or update the session data in Redis with a 5-minute TTL
