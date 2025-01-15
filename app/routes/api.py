@@ -303,7 +303,7 @@ async def raw_file_upload(
 
 
 @router.get("/get-file-name")
-async def get_file_name(session_id: str = Depends(get_session_id)):
+async def get_file_name(session_id: str = Cookie(None)):
     """
     Retrieve the file name or value pair stored in the session data based on the session_id.
     """
