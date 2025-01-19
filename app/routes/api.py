@@ -20,6 +20,8 @@ import pandas as pd
 import os
 import joblib
 from app.services.s3_service import S3
+from app.services.input_handle_service import preprocess
+
 
 router = APIRouter(prefix="/api", tags=["api"])
 settings = get_settings()
@@ -45,87 +47,92 @@ async def get_dashboard(
         session_data = redis_client.get_session_data(session_id)
         if not session_data:
             return Response(status_code=400, content="Session Expired or not found")
-        file_data = await s3_service.read(session_data)
 
+        file_data = await s3_service.read(session_data)
         file_like_object = io.BytesIO(file_data)
 
-        # Read CSV with PyArrow engine
-        data_frame = pd.read_csv(
-            file_like_object,
-            engine="pyarrow",
-            dtype_backend="pyarrow"
-        )
+        data_frame = await preprocess(file_like_object)
 
-        total_rows = len(data_frame)
-
-        # Ensure 'Label' and 'Timestamp' columns exist
-        if "Label" not in data_frame.columns:
-            return Response(
-                status_code=400, content="Label column missing in the dataset"
-            )
-
-        if "Timestamp" not in data_frame.columns:
-            return Response(
-                status_code=400, content="Timestamp column missing in the dataset"
-            )
-
-        # Convert Timestamp to datetime and sort
-        data_frame["Timestamp"] = pd.to_datetime(data_frame["Timestamp"])
-        data_frame.sort_values(by="Timestamp", inplace=True)
-
-        # For the dashboard
+        # Compute counts and distributions
         benign_count = data_frame[data_frame["Label"] == "BENIGN"].shape[0]
+        total_rows = len(data_frame)
         non_benign_count = total_rows - benign_count
-        unique_attacks = (
-            data_frame[data_frame["Label"] != "BENIGN"]["Label"].unique().tolist()
-        )
 
-        # 1) Resample Flow Bytes/s to 1-second intervals using mean
-        #    - set index as Timestamp
-        data_frame.set_index("Timestamp", inplace=True)
 
-        # rename Flow Bytes/s to flow_bytes/s
-        data_frame.rename(columns={"Flow Bytes/s": "flow_bytes/s"}, inplace=True)
+        # Rename columns for resampling
+        data_frame.rename(columns={
+            "Flow Bytes/s": "flow_bytes/s",
+            "Fwd Packets/s": "fwd_packets/s",
+            "Bwd Packets/s": "bwd_packets/s"
+        }, inplace=True)
 
-        #    - resample by 1 second and calculate mean for Flow Bytes/s
+        # Resample Flow Bytes/s
         flow_bytes_resampled = (
             data_frame["flow_bytes/s"]
             .resample("1S")
             .mean()
             .reset_index()
         )
+        flow_bytes_resampled.columns = ["timestamp", "value"]
 
-        if flow_bytes_resampled.columns[0] != "timestamp":
-            flow_bytes_resampled.rename(columns={flow_bytes_resampled.columns[0]: 'timestamp'}, inplace=True)
+        flow_bytes_resampled["value"] = flow_bytes_resampled["value"].round(2)
+        flow_bytes_list = flow_bytes_resampled.dropna().to_dict(orient="records")
 
-        # 2) Convert back to dict for JSON response
-        flow_bytes_per_second_series = flow_bytes_resampled.dropna().to_dict(orient="records")
+        # Resample Forward Packets/s
+        fwd_packets_resampled = (
+            data_frame["fwd_packets/s"]
+            .resample("1S")
+            .mean()
+            .reset_index()
+        )
+        fwd_packets_resampled.columns = ["timestamp", "value"]
 
-        # Other distributions
+        fwd_packets_resampled["value"] = fwd_packets_resampled["value"].round(2)
+        fwd_packets_list = fwd_packets_resampled.dropna().to_dict(orient="records")
+
+        # Resample Backward Packets/s
+        bwd_packets_resampled = (
+            data_frame["bwd_packets/s"]
+            .resample("1S")
+            .mean()
+            .reset_index()
+        )
+        bwd_packets_resampled.columns = ["timestamp", "value"]
+
+        bwd_packets_resampled["value"] = bwd_packets_resampled["value"].round(2)
+        bwd_packets_list = bwd_packets_resampled.dropna().to_dict(orient="records")
+
+        # Calculate distributions
         src_port_distribution = Counter(data_frame["Src Port"])
         dst_port_distribution = Counter(data_frame["Dst Port"])
         protocol_distribution = Counter(data_frame["Protocol"])
         src_ip_address_distribution = Counter(data_frame["Src IP"])
         label_distribution = Counter(data_frame["Label"])
 
-        # Convert index back so subsequent calls to e.g. data_frame[“Label”] still work
+        if "BENIGN" in label_distribution:
+            del label_distribution["BENIGN"]
+
+        # Reset index so further operations can use columns normally
         data_frame.reset_index(inplace=True)
 
         return {
             "file_name": session_data,
             "total_rows": total_rows,
             "total_detected_attacks": non_benign_count,
-            "detected_attack_types": unique_attacks,
+            "detected_attacks_distribution": dict(label_distribution),
+            "src_ip_address_distribution": dict(src_ip_address_distribution),
             "src_port_distribution": dict(src_port_distribution),
             "dst_port_distribution": dict(dst_port_distribution),
             "protocol_distribution": dict(protocol_distribution),
-            "src_ip_address_distribution": dict(src_ip_address_distribution),
-            "class_distribution": label_distribution,
-            "flow_bytes/s": flow_bytes_per_second_series,
+            "flow_bytes_per_second": flow_bytes_list,
+            "fwd_packets_per_second": fwd_packets_list,
+            "bwd_packets_per_second": bwd_packets_list
         }
+
     except Exception as e:
         print(e)
         return Response(status_code=400, content="Failed to retrieve dashboard.")
+
 
 @router.post("/upload")
 async def upload_file(
@@ -255,6 +262,62 @@ async def upload_file(
         raise HTTPException(
             status_code=500, detail="Failed to process the uploaded file."
         )
+
+
+@router.get("/attack-detection/brief/scatter")
+async def get_attack_detection_brief_scatter(
+    attack_type: str,
+    session_id: Optional[str] = Cookie(None),
+    s3_service: S3 = Depends(S3),
+):
+    if not session_id:
+        return Response(status_code=400, content="Session ID missing")
+
+    try:
+        session_data = redis_client.get_session_data(session_id)
+        if not session_data:
+            return Response(status_code=400, content="Session Expired or not found")
+
+        file_data = await s3_service.read(session_data)
+        file_like_object = io.BytesIO(file_data)
+
+        data_frame = await preprocess(file_like_object)
+
+        data_frame["is_attack"] = data_frame["Label"].apply(lambda x: x != "BENIGN")
+
+        data_frame.reset_index(inplace=True)
+
+        data_frame["Flow Bytes/s"] = data_frame["Flow Bytes/s"].astype(float)
+
+        # Round to two decimal places
+        data_frame["Flow Bytes/s"] = data_frame["Flow Bytes/s"].round(2)
+
+        benign_data = [
+            {
+                "timestamp": row["Timestamp"].isoformat(),
+                "value": row["Flow Bytes/s"]
+            }
+            for row in data_frame[data_frame["is_attack"] == False].dropna().to_dict(orient="records")
+        ]
+
+        attack_data = [
+            {
+                "timestamp": row["Timestamp"].isoformat(),
+                "value": row["Flow Bytes/s"]
+            }
+            for row in data_frame[data_frame["is_attack"] == True].dropna().to_dict(orient="records")
+        ]
+
+        return {
+            "attack_type": attack_type,
+            "benign_data": benign_data,
+            "attack_data": attack_data,
+            "feature_name": "Flow Bytes/s",
+        }
+
+    except Exception as e:
+        print(e)
+        return Response(status_code=400, content="Failed to retrieve data.")
 
 
 @router.post("/raw-file-upload")
