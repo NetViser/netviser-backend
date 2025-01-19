@@ -1,5 +1,6 @@
 .pdm-python
 .env
+__pycache__/
 **/__pycache__/
 app/configs/__pycache__/
 app/routes/__pycache__/
