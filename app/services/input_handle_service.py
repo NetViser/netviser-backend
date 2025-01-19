@@ -24,7 +24,4 @@ async def preprocess(file_like_object):
     #    - set index as Timestamp
     data_frame.set_index("Timestamp", inplace=True)
 
-    # rename Flow Bytes/s to flow_bytes/s
-    data_frame.rename(columns={"Flow Bytes/s": "flow_bytes/s"}, inplace=True)
-
     return data_frame

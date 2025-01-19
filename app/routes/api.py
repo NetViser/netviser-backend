@@ -53,6 +53,9 @@ async def get_dashboard(
 
         data_frame = await preprocess(file_like_object)
 
+        # rename Flow Bytes/s to flow_bytes/s
+        data_frame.rename(columns={"Flow Bytes/s": "flow_bytes/s"}, inplace=True)
+
         total_rows = len(data_frame)
 
         # For the dashboard
@@ -130,19 +133,32 @@ async def get_attack_detection_brief_scatter(
 
         data_frame.reset_index(inplace=True)
 
-        data_points = [
+        data_frame["Flow Bytes/s"] = data_frame["Flow Bytes/s"].astype(float)
+
+        # Round to two decimal places
+        data_frame["Flow Bytes/s"] = data_frame["Flow Bytes/s"].round(2)
+
+        benign_data = [
             {
                 "timestamp": row["Timestamp"].isoformat(),
-                "value": row["flow_bytes/s"],
-                "is_attack": row["is_attack"],
-                "feature": "Flow Bytes/s",
+                "value": row["Flow Bytes/s"]
             }
-            for row in data_frame.dropna().to_dict(orient="records")
+            for row in data_frame[data_frame["is_attack"] == False].dropna().to_dict(orient="records")
+        ]
+
+        attack_data = [
+            {
+                "timestamp": row["Timestamp"].isoformat(),
+                "value": row["Flow Bytes/s"]
+            }
+            for row in data_frame[data_frame["is_attack"] == True].dropna().to_dict(orient="records")
         ]
 
         return {
             "attack_type": attack_type,
-            "data_points": data_points,
+            "benign_data": benign_data,
+            "attack_data": attack_data,
+            "feature_name": "Flow Bytes/s",
         }
 
     except Exception as e:
