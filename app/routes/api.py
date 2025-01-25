@@ -12,6 +12,7 @@ from fastapi import (
     Cookie,
     Depends,
     HTTPException,
+    Query,
 )
 from typing import Optional
 from app.configs.config import get_settings
@@ -31,6 +32,7 @@ SESSION_COOKIE_NAME = "session_id"
 
 # Instantiate our singleton Redis client once
 redis_client = RedisClient()
+
 
 @router.get("/dashboard")
 async def get_dashboard(
@@ -58,20 +60,19 @@ async def get_dashboard(
         total_rows = len(data_frame)
         non_benign_count = total_rows - benign_count
 
-
         # Rename columns for resampling
-        data_frame.rename(columns={
-            "Flow Bytes/s": "flow_bytes/s",
-            "Fwd Packets/s": "fwd_packets/s",
-            "Bwd Packets/s": "bwd_packets/s"
-        }, inplace=True)
+        data_frame.rename(
+            columns={
+                "Flow Bytes/s": "flow_bytes/s",
+                "Fwd Packets/s": "fwd_packets/s",
+                "Bwd Packets/s": "bwd_packets/s",
+            },
+            inplace=True,
+        )
 
         # Resample Flow Bytes/s
         flow_bytes_resampled = (
-            data_frame["flow_bytes/s"]
-            .resample("1S")
-            .mean()
-            .reset_index()
+            data_frame["flow_bytes/s"].resample("1S").mean().reset_index()
         )
         flow_bytes_resampled.columns = ["timestamp", "value"]
 
@@ -80,10 +81,7 @@ async def get_dashboard(
 
         # Resample Forward Packets/s
         fwd_packets_resampled = (
-            data_frame["fwd_packets/s"]
-            .resample("1S")
-            .mean()
-            .reset_index()
+            data_frame["fwd_packets/s"].resample("1S").mean().reset_index()
         )
         fwd_packets_resampled.columns = ["timestamp", "value"]
 
@@ -92,10 +90,7 @@ async def get_dashboard(
 
         # Resample Backward Packets/s
         bwd_packets_resampled = (
-            data_frame["bwd_packets/s"]
-            .resample("1S")
-            .mean()
-            .reset_index()
+            data_frame["bwd_packets/s"].resample("1S").mean().reset_index()
         )
         bwd_packets_resampled.columns = ["timestamp", "value"]
 
@@ -126,12 +121,103 @@ async def get_dashboard(
             "protocol_distribution": dict(protocol_distribution),
             "flow_bytes_per_second": flow_bytes_list,
             "fwd_packets_per_second": fwd_packets_list,
-            "bwd_packets_per_second": bwd_packets_list
+            "bwd_packets_per_second": bwd_packets_list,
         }
 
     except Exception as e:
         print(e)
         return Response(status_code=400, content="Failed to retrieve dashboard.")
+
+
+@router.get("/attack-detection/specific")
+async def get_specific_attack_detection(
+    attack_type: str,
+    session_id: Optional[str] = Cookie(None),
+    page: int = Query(1, ge=1),  # Default to page 1, must be >= 1
+    page_size: int = Query(10, ge=1, le=100),  # Default to 10, max 100 per page
+    s3_service: S3 = Depends(S3),
+):
+    """
+    Retrieve the data for a specific attack type stored in S3 based on the session_id.
+    Paginated results are returned for both normal and attack data.
+    """
+    if not session_id:
+        return Response(status_code=400, content="Session ID missing")
+
+    try:
+        session_data = redis_client.get_session_data(session_id)
+        if not session_data:
+            return Response(status_code=400, content="Session Expired or not found")
+
+        file_data = await s3_service.read(session_data)
+        file_like_object = io.BytesIO(file_data)
+
+        data_frame = await preprocess(file_like_object)
+
+        normal_df = data_frame[data_frame["Label"] == "BENIGN"]
+        attack_df = data_frame[data_frame["Label"] == attack_type]
+
+        normal_df.reset_index(inplace=True)
+        attack_df.reset_index(inplace=True)
+
+        normal_df["Flow Bytes/s"] = normal_df["Flow Bytes/s"].astype(float).round(2)
+        attack_df["Flow Bytes/s"] = attack_df["Flow Bytes/s"].astype(float).round(2)
+
+        # Pagination logic for normal data
+        start_idx = (page - 1) * page_size
+        end_idx = start_idx + page_size
+        paginated_normal_df = normal_df.iloc[start_idx:end_idx]
+        paginated_attack_df = attack_df.iloc[start_idx:end_idx]
+
+        normal_data = [
+            {
+                "timestamp": row["Timestamp"].isoformat(),
+                "Flow Bytes/s": row["Flow Bytes/s"],
+                "Flow Duration": row["Flow Duration"],
+                "Flow Packets/s": row["Flow Packets/s"],
+                "Average Packet Size": row["Average Packet Size"],
+                "Total Fwd Packet": row["Total Fwd Packet"],
+                "Total Length of Fwd Packet": row["Total Length of Fwd Packet"],
+                "Protocol": row["Protocol"],
+                "Src IP": row["Src IP"],
+                "Dst IP": row["Dst IP"],
+                "Src Port": row["Src Port"],
+                "Dst Port": row["Dst Port"],
+            }
+            for row in paginated_normal_df.dropna().to_dict(orient="records")
+        ]
+
+        attack_data = [
+            {
+                "timestamp": row["Timestamp"].isoformat(),
+                "Flow Bytes/s": row["Flow Bytes/s"],
+                "Flow Duration": row["Flow Duration"],
+                "Flow Packets/s": row["Flow Packets/s"],
+                "Average Packet Size": row["Average Packet Size"],
+                "Total Fwd Packet": row["Total Fwd Packet"],
+                "Total Length of Fwd Packet": row["Total Length of Fwd Packet"],
+                "Protocol": row["Protocol"],
+                "Src IP": row["Src IP"],
+                "Dst IP": row["Dst IP"],
+                "Src Port": row["Src Port"],
+                "Dst Port": row["Dst Port"],
+            }
+            for row in paginated_attack_df.dropna().to_dict(orient="records")
+        ]
+
+        return {
+            "attack_type": attack_type,
+            "page": page,
+            "page_size": page_size,
+            "total_normal_records": len(normal_df),
+            "total_attack_records": len(attack_df),
+            "normal_data": normal_data,
+            "attack_data": attack_data,
+        }
+
+    except Exception as e:
+        print(e)
+        return Response(status_code=400, content="Failed to retrieve data.")
 
 
 @router.post("/upload")
@@ -293,19 +379,17 @@ async def get_attack_detection_brief_scatter(
         data_frame["Flow Bytes/s"] = data_frame["Flow Bytes/s"].round(2)
 
         benign_data = [
-            {
-                "timestamp": row["Timestamp"].isoformat(),
-                "value": row["Flow Bytes/s"]
-            }
-            for row in data_frame[data_frame["is_attack"] == False].dropna().to_dict(orient="records")
+            {"timestamp": row["Timestamp"].isoformat(), "value": row["Flow Bytes/s"]}
+            for row in not data_frame[~data_frame["is_attack"]]
+            .dropna()
+            .to_dict(orient="records")
         ]
 
         attack_data = [
-            {
-                "timestamp": row["Timestamp"].isoformat(),
-                "value": row["Flow Bytes/s"]
-            }
-            for row in data_frame[data_frame["is_attack"] == True].dropna().to_dict(orient="records")
+            {"timestamp": row["Timestamp"].isoformat(), "value": row["Flow Bytes/s"]}
+            for row in data_frame[data_frame["is_attack"]]
+            .dropna()
+            .to_dict(orient="records")
         ]
 
         return {
