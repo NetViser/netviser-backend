@@ -220,6 +220,73 @@ async def get_specific_attack_detection(
         return Response(status_code=400, content="Failed to retrieve data.")
 
 
+@router.get("/attack-detection/records")
+async def fetch_attack_records(
+    attack_type: str,
+    session_id: Optional[str] = Cookie(None),
+    page: int = Query(1, ge=1),  # Default to page 1, must be >= 1
+    page_size: int = Query(10, ge=1, le=100),  # Default to 10, max 100 per page
+    s3_service: S3 = Depends(S3),
+):
+    if not session_id:
+        return Response(status_code=400, content="Session ID missing")
+
+    try:
+        session_data = redis_client.get_session_data(session_id)
+        if not session_data:
+            return Response(status_code=400, content="Session Expired or not found")
+
+        file_data = await s3_service.read(session_data)
+        file_like_object = io.BytesIO(file_data)
+
+        data_frame = await preprocess(file_like_object)
+        attack_df = data_frame[data_frame["Label"] == attack_type]
+        attack_df.reset_index(inplace=True)
+
+        attack_df = attack_df.sort_values(by="Timestamp", ascending=False)
+
+        total_records = len(attack_df)
+        total_pages = (total_records + page_size - 1) // page_size  # Ceiling division
+
+        start_idx = (page - 1) * page_size
+        end_idx = start_idx + page_size
+        paginated_attack_df = attack_df.iloc[start_idx:end_idx]
+
+        attack_data = [
+            {
+                "timestamp": row["Timestamp"].isoformat(),
+                "flowBytesPerSecond": row["Flow Bytes/s"],
+                "flowDuration": row["Flow Duration"],
+                "flowPacketsPerSecond": row["Flow Packets/s"],
+                "avgPacketSize": row["Average Packet Size"],
+                "totalFwdPacket": row["Total Fwd Packet"],
+                "totalLengthFwdPacket": row["Total Length of Fwd Packet"],
+                "protocol": row["Protocol"],
+                "srcIP": row["Src IP"],
+                "dstIP": row["Dst IP"],
+                "srcPort": row["Src Port"],
+                "dstPort": row["Dst Port"],
+            }
+            for row in paginated_attack_df.dropna().to_dict(orient="records")
+        ]
+
+        return {
+            "attack_type": attack_type,
+            "page": page,
+            "page_size": page_size,
+            "total_records": total_records,
+            "total_pages": total_pages,
+            "has_next_page": page < total_pages,
+            "has_previous_page": page > 1,
+            "next_page": page + 1 if page < total_pages else None,
+            "previous_page": page - 1 if page > 1 else None,
+            "attack_data": attack_data,
+        }
+    except Exception as e:
+        print(e)
+        return Response(status_code=400, content="Failed to retrieve data.")
+
+
 @router.post("/upload")
 async def upload_file(
     response: Response,
