@@ -133,8 +133,6 @@ async def get_dashboard(
 async def get_specific_attack_detection(
     attack_type: str,
     session_id: Optional[str] = Cookie(None),
-    page: int = Query(1, ge=1),  # Default to page 1, must be >= 1
-    page_size: int = Query(10, ge=1, le=100),  # Default to 10, max 100 per page
     s3_service: S3 = Depends(S3),
 ):
     """
@@ -154,65 +152,71 @@ async def get_specific_attack_detection(
 
         data_frame = await preprocess(file_like_object)
 
+        # Round specified fields to 2 decimal places
+        data_frame.reset_index(inplace=True)
+
+        # Round specified fields to 2 decimal places using a loop using log scale
+        fields_to_round = [
+            "Flow Bytes/s",
+            "Flow Packets/s",
+            "Flow Duration",
+            "Average Packet Size",
+        ]
+        for field in fields_to_round:
+            data_frame[field] = data_frame[field].astype(float).round(2)
+            # apply log scale to the field log (10)
+            data_frame[field] = np.log10(data_frame[field] + 1)
+
         normal_df = data_frame[data_frame["Label"] == "BENIGN"]
+        normal_df = normal_df.sort_values(by="Timestamp", ascending=False)
         attack_df = data_frame[data_frame["Label"] == attack_type]
+        attack_df = attack_df.sort_values(by="Timestamp", ascending=False)
 
-        normal_df.reset_index(inplace=True)
-        attack_df.reset_index(inplace=True)
-
-        normal_df["Flow Bytes/s"] = normal_df["Flow Bytes/s"].astype(float).round(2)
-        attack_df["Flow Bytes/s"] = attack_df["Flow Bytes/s"].astype(float).round(2)
-
-        # Pagination logic for normal data
-        start_idx = (page - 1) * page_size
-        end_idx = start_idx + page_size
-        paginated_normal_df = normal_df.iloc[start_idx:end_idx]
-        paginated_attack_df = attack_df.iloc[start_idx:end_idx]
-
+        # Prepare normal data in camelCase
         normal_data = [
             {
                 "timestamp": row["Timestamp"].isoformat(),
-                "Flow Bytes/s": row["Flow Bytes/s"],
-                "Flow Duration": row["Flow Duration"],
-                "Flow Packets/s": row["Flow Packets/s"],
-                "Average Packet Size": row["Average Packet Size"],
-                "Total Fwd Packet": row["Total Fwd Packet"],
-                "Total Length of Fwd Packet": row["Total Length of Fwd Packet"],
-                "Protocol": row["Protocol"],
-                "Src IP": row["Src IP"],
-                "Dst IP": row["Dst IP"],
-                "Src Port": row["Src Port"],
-                "Dst Port": row["Dst Port"],
+                "flowBytesPerSecond": row["Flow Bytes/s"],
+                "flowDuration": row["Flow Duration"],
+                "flowPacketsPerSecond": row["Flow Packets/s"],
+                "averagePacketSize": row["Average Packet Size"],
+                "totalFwdPacket": row["Total Fwd Packet"],
+                "totalLengthOfFwdPacket": row["Total Length of Fwd Packet"],
+                "protocol": row["Protocol"],
+                "srcIp": row["Src IP"],
+                "dstIp": row["Dst IP"],
+                "srcPort": row["Src Port"],
+                "dstPort": row["Dst Port"],
             }
-            for row in paginated_normal_df.dropna().to_dict(orient="records")
+            for row in normal_df.dropna().to_dict(orient="records")
         ]
 
+        # Prepare attack data in camelCase
         attack_data = [
             {
                 "timestamp": row["Timestamp"].isoformat(),
-                "Flow Bytes/s": row["Flow Bytes/s"],
-                "Flow Duration": row["Flow Duration"],
-                "Flow Packets/s": row["Flow Packets/s"],
-                "Average Packet Size": row["Average Packet Size"],
-                "Total Fwd Packet": row["Total Fwd Packet"],
-                "Total Length of Fwd Packet": row["Total Length of Fwd Packet"],
-                "Protocol": row["Protocol"],
-                "Src IP": row["Src IP"],
-                "Dst IP": row["Dst IP"],
-                "Src Port": row["Src Port"],
-                "Dst Port": row["Dst Port"],
+                "flowBytesPerSecond": row["Flow Bytes/s"],
+                "flowDuration": row["Flow Duration"],
+                "flowPacketsPerSecond": row["Flow Packets/s"],
+                "averagePacketSize": row["Average Packet Size"],
+                "totalFwdPacket": row["Total Fwd Packet"],
+                "totalLengthOfFwdPacket": row["Total Length of Fwd Packet"],
+                "protocol": row["Protocol"],
+                "srcIp": row["Src IP"],
+                "dstIp": row["Dst IP"],
+                "srcPort": row["Src Port"],
+                "dstPort": row["Dst Port"],
             }
-            for row in paginated_attack_df.dropna().to_dict(orient="records")
+            for row in attack_df.dropna().to_dict(orient="records")
         ]
 
+        # print the maximum value for the flow bytes per second of the attack data
+        max_flow_bytes_per_second = normal_df["Flow Bytes/s"].max()
+        print(f"Max flow bytes per second for {attack_type}: {max_flow_bytes_per_second}")
+
         return {
-            "attack_type": attack_type,
-            "page": page,
-            "page_size": page_size,
-            "total_normal_records": len(normal_df),
-            "total_attack_records": len(attack_df),
-            "normal_data": normal_data,
-            "attack_data": attack_data,
+            "normalData": normal_data,
+            "attackData": attack_data,
         }
 
     except Exception as e:
