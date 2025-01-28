@@ -152,10 +152,9 @@ async def get_specific_attack_detection(
 
         data_frame = await preprocess(file_like_object)
 
-        # Round specified fields to 2 decimal places
         data_frame.reset_index(inplace=True)
 
-        # Round specified fields to 2 decimal places using a loop using log scale
+        # Round specified fields to 2 decimal places and apply log scale
         fields_to_round = [
             "Flow Bytes/s",
             "Flow Packets/s",
@@ -164,9 +163,21 @@ async def get_specific_attack_detection(
         ]
         for field in fields_to_round:
             data_frame[field] = data_frame[field].astype(float).round(2)
-            # apply log scale to the field log (10)
             data_frame[field] = np.log10(data_frame[field] + 1)
 
+        # Count the number of occurrences for each Src Port and Dst Port pair
+        port_pair_counts = (
+            data_frame.groupby(["Src Port", "Dst Port"])
+            .size()
+            .reset_index(name="Port Pair Count")
+        )
+
+        # Merge the counts back into the original DataFrame
+        data_frame = data_frame.merge(
+            port_pair_counts, on=["Src Port", "Dst Port"], how="left"
+        )
+
+        # Separate data into normal and attack DataFrames
         normal_df = data_frame[data_frame["Label"] == "BENIGN"]
         normal_df = normal_df.sort_values(by="Timestamp", ascending=False)
         attack_df = data_frame[data_frame["Label"] == attack_type]
@@ -187,6 +198,7 @@ async def get_specific_attack_detection(
                 "dstIp": row["Dst IP"],
                 "srcPort": row["Src Port"],
                 "dstPort": row["Dst Port"],
+                "portPairCount": row["Port Pair Count"],
             }
             for row in normal_df.dropna().to_dict(orient="records")
         ]
@@ -206,13 +218,10 @@ async def get_specific_attack_detection(
                 "dstIp": row["Dst IP"],
                 "srcPort": row["Src Port"],
                 "dstPort": row["Dst Port"],
+                "portPairCount": row["Port Pair Count"],
             }
             for row in attack_df.dropna().to_dict(orient="records")
         ]
-
-        # print the maximum value for the flow bytes per second of the attack data
-        max_flow_bytes_per_second = normal_df["Flow Bytes/s"].max()
-        print(f"Max flow bytes per second for {attack_type}: {max_flow_bytes_per_second}")
 
         return {
             "normalData": normal_data,
