@@ -172,9 +172,21 @@ async def get_specific_attack_detection(
             .reset_index(name="Port Pair Count")
         )
 
+        # Count the number of occurrences for each Src IP and Src Port pair
+        src_ip_port_pair_counts = (
+            data_frame.groupby(["Src IP", "Src Port"])
+            .size()
+            .reset_index(name="Src IP Port Pair Count")
+        )
+
         # Merge the counts back into the original DataFrame
         data_frame = data_frame.merge(
             port_pair_counts, on=["Src Port", "Dst Port"], how="left"
+        )
+
+        # Merge the Src IP Port Pair Count back into the original DataFrame
+        data_frame = data_frame.merge(
+            src_ip_port_pair_counts, on=["Src IP", "Src Port"], how="left"
         )
 
         # Separate data into normal and attack DataFrames
@@ -199,6 +211,7 @@ async def get_specific_attack_detection(
                 "srcPort": row["Src Port"],
                 "dstPort": row["Dst Port"],
                 "portPairCount": row["Port Pair Count"],
+                "srcIpPortPairCount": row["Src IP Port Pair Count"],
             }
             for row in normal_df.dropna().to_dict(orient="records")
         ]
@@ -219,6 +232,7 @@ async def get_specific_attack_detection(
                 "srcPort": row["Src Port"],
                 "dstPort": row["Dst Port"],
                 "portPairCount": row["Port Pair Count"],
+                "srcIpPortPairCount": row["Src IP Port Pair Count"],
             }
             for row in attack_df.dropna().to_dict(orient="records")
         ]
