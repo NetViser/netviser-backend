@@ -1,5 +1,6 @@
 from io import BytesIO
 from typing import Any, Dict, Optional
+from botocore.config import Config
 import uuid
 import boto3
 from botocore.exceptions import ClientError
@@ -46,12 +47,18 @@ class S3:
 
         self.bucket_name = bucket_name
         self.region_name = region_name
+        self.path_prefix = "uploads"
+
+        # Create a botocore Config with Signature Version 4
+        my_config = Config(signature_version="s3v4")
 
         self.client = boto3.client(
             "s3",
             region_name=region_name,
             aws_access_key_id=access_key,
             aws_secret_access_key=secret_access_key,
+            config=my_config,
+            endpoint_url=f"https://s3.{region_name}.amazonaws.com",
         )
 
         # Configure TransferConfig for multipart uploads
@@ -87,7 +94,7 @@ class S3:
             raise HTTPException(status_code=400, detail="Session ID missing")
 
         file_id = str(uuid.uuid4())
-        s3_key = f"uploads/{session_id}/{file_id}_{filename}"
+        s3_key = f"sessions/{session_id}/{file_id}_{filename}"
 
         try:
             presigned_url = self.client.generate_presigned_url(
@@ -100,11 +107,24 @@ class S3:
             raise HTTPException(
                 status_code=500, detail="Failed to generate presigned URL."
             ) from e
+        
+    def get_url(self, s3_key: str, expiration: int = 3600, session_id: Optional[str] = Cookie(None)) -> str:
+        try:
+            print("Get url", f"{self.path_prefix}/{session_id}/{s3_key}")
+            url = self.client.generate_presigned_url(
+                "get_object",
+                Params={"Bucket": self.bucket_name, "Key": f"{self.path_prefix}/{session_id}/{s3_key}"},
+                ExpiresIn=expiration
+            )
+            print("URL", url)
+            return url
+        except ClientError as e:
+            raise HTTPException(status_code=500, detail="Failed to generate get URL.") from e
 
     async def upload(
         self,
         file: UploadFile,
-        filename: str,
+        file_path: str,
         session_id: Optional[str] = Cookie(None),
         extra_args: dict = {},
     ) -> Dict[str, Any]:
@@ -120,7 +140,7 @@ class S3:
 
         try:
             # Generate a unique S3 key
-            s3_key = f"uploads/{session_id}/{filename}"
+            s3_key = f"{self.path_prefix}/{session_id}/{file_path}"
 
             # Upload the file to S3 using multipart upload
             await asyncio.to_thread(
@@ -133,7 +153,7 @@ class S3:
             )
 
             return {
-                "filename": filename,
+                "filename": file_path,
                 "s3_key": s3_key,
                 "file_path": f"https://{self.bucket_name}.s3.{self.region_name}.amazonaws.com/{s3_key}",
                 "extra_args": extra_args,
@@ -143,13 +163,13 @@ class S3:
                 status_code=500, detail="Failed to upload file to S3."
             ) from e
 
-    async def file_exists(self, filename: str) -> bool:
+    async def file_exists(self, filename: str, session_id) -> bool:
         """Check if a file exists in the S3 bucket."""
         try:
             response = await asyncio.to_thread(
                 self.client.list_objects_v2,
                 Bucket=self.bucket_name,
-                Prefix=filename,
+                Prefix=f"{self.path_prefix}/{session_id}/{filename}",
             )
             return "Contents" in response
         except ClientError as e:

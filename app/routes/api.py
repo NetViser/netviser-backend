@@ -1,3 +1,4 @@
+import asyncio
 from collections import Counter
 import io
 import uuid
@@ -20,6 +21,7 @@ import xgboost as xgb
 import pandas as pd
 import os
 import joblib
+import shap
 from app.services.s3_service import S3
 from app.services.input_handle_service import preprocess
 
@@ -127,6 +129,201 @@ async def get_dashboard(
     except Exception as e:
         print(e)
         return Response(status_code=400, content="Failed to retrieve dashboard.")
+
+
+@router.get("/attack-detection/individual/xai")
+async def get_attack_detection_xai(
+    attack_type: str,
+    data_point_id: int,
+    session_id: Optional[str] = Cookie(None),
+    s3_service: S3 = Depends(S3),
+):
+    """
+    Retrieve the data for XAI stored in S3 based on the session_id.
+    """
+    if not session_id:
+        raise HTTPException(status_code=400, detail="Session ID missing")
+    print("session_id", session_id)
+
+    base_key = f"xai/{attack_type}/{data_point_id}"
+    force_plot_image_key = f"{base_key}/images/force_plot.png"
+    force_plot_text_key = f"{base_key}/texts/force_plot.text"
+
+    # Check if both the image and SHAP text file already exist in S3.
+    if await s3_service.file_exists(
+        filename=force_plot_image_key, session_id=session_id
+    ) and await s3_service.file_exists(
+        filename=force_plot_text_key, session_id=session_id
+    ):
+        print("Both files exist in S3.", force_plot_image_key, force_plot_text_key)
+        image_url = s3_service.get_url(
+            s3_key=force_plot_image_key, session_id=session_id, expiration=21600
+        )
+
+        shap_txt_data = await s3_service.read(f"uploads/{session_id}/{force_plot_text_key}")
+        shap_text = shap_txt_data.decode("utf-8")
+        return {"force_plot_url": image_url}
+
+    print("pas the check")
+
+    try:
+        session_data = redis_client.get_session_data(session_id)
+        if not session_data:
+            raise HTTPException(status_code=400, detail="Session Expired or not found")
+        
+        print("session_data", session_data)
+
+        file_data = await s3_service.read(session_data)
+        file_like_object = io.BytesIO(file_data)
+        df = pd.read_csv(file_like_object, engine="pyarrow", dtype_backend="pyarrow")
+        df.reset_index(inplace=True)
+
+        # Load the pre-trained model and scaler
+        model = xgb.Booster()
+        model.load_model(os.path.join("model", "xgb_booster.model"))
+        scaler = joblib.load(os.path.join("model", "scaler.pkl"))
+        label_encoder = joblib.load(os.path.join("model", "label_encoder.pkl"))
+
+        explainer = shap.TreeExplainer(model)
+        feature_cols = [
+            "Src Port",
+            "Dst Port",
+            "Total TCP Flow Time",
+            "Bwd Init Win Bytes",
+            "Bwd Packet Length Std",
+            "Total Length of Fwd Packet",
+            "Fwd Packet Length Max",
+            "Bwd IAT Mean",
+            "Flow IAT Min",
+            "Fwd PSH Flags",
+        ]
+
+        X = df[feature_cols]
+
+        # Scale the input features
+        X_scaled = scaler.transform(X)
+        X_scaled_df = pd.DataFrame(X_scaled, columns=feature_cols)
+
+        # Prepare un-scaled data for SHAP values
+        X_unscaled = df[feature_cols]
+
+        # Single network flow data point
+        single_instance_scaled = X_scaled_df.iloc[[data_point_id]]
+        dtest_single = xgb.DMatrix(single_instance_scaled)
+
+        # Get predicted class
+        print("A1", df["Label"].iloc[data_point_id])
+        predicted_class_index = label_encoder.transform(
+            [df["Label"].iloc[data_point_id]]
+        )[0]
+        predicted_class = label_encoder.inverse_transform([predicted_class_index])[0]
+
+        print(f"Predicted class: {predicted_class}")
+
+        explainer = shap.TreeExplainer(model)
+        shap_values_single = explainer.shap_values(single_instance_scaled)
+
+        def format_val(x):
+            return ("%.2f" % x).rstrip("0").rstrip(".")
+
+        original_values_row = X_unscaled.iloc[data_point_id].copy()
+        formatted_features = original_values_row.apply(format_val)
+
+        attack_shap_val = shap_values_single[0, :, predicted_class_index]
+
+        expected_value_for_class = explainer.expected_value[predicted_class_index]
+
+        force_plot = shap.plots.force(
+            base_value=expected_value_for_class,
+            shap_values=attack_shap_val,
+            features=formatted_features,
+            feature_names=formatted_features.index.tolist(),
+            matplotlib=True,  # Use the matplotlib-based plot
+            figsize=(30, 6),
+            show=False,
+        )
+
+        force_plot.figure.suptitle(
+            f"Force Plot for Instance {data_point_id} (Pred: {predicted_class})",
+            fontsize=16,
+        )
+        force_plot.figure.tight_layout()
+
+        # Save the plot to an in-memory buffer
+        buf = io.BytesIO()
+        force_plot.figure.savefig(buf, format="png", bbox_inches="tight")
+        buf.seek(0)
+        image_data = buf.getvalue()
+
+        # Generate a text representation of the SHAP values (for example, a simple table)
+
+        base_value = explainer.expected_value[predicted_class_index]
+        class_name = label_encoder.inverse_transform([predicted_class_index])[0]
+
+        # Create a DataFrame (force_data) with Feature, Feature Value, and SHAP Value
+        shap_val = attack_shap_val
+        force_data = pd.DataFrame(
+            {
+                "Feature": X_unscaled.columns,
+                "Feature Value": formatted_features,
+                "SHAP Value": shap_val,
+            }
+        )
+
+        # Sort features by absolute SHAP value descending
+        force_data = force_data.reindex(
+            force_data["SHAP Value"].abs().sort_values(ascending=False).index
+        )
+
+        # Start building a text output
+        shap_text = ""
+        shap_text += f"--- Data Behind Force Plot for Class {predicted_class_index}: {class_name} ---\n"
+        shap_text += f"Base (Expected) Value: {base_value}\n\n"
+
+        # Add a simple table header
+        shap_text += f"{'Feature':30s} | {'Feature Value':>12s} | {'SHAP Value':>10s}\n"
+        shap_text += f"{'-'*30} | {'-'*12} | {'-'*10}\n"
+
+        # Iterate over each feature row and format the columns
+        for i, row in force_data.iterrows():
+            feature_name = str(row["Feature"])
+            feature_value = str(row["Feature Value"])
+            shap_value = row["SHAP Value"]
+            shap_text += (
+                f"{feature_name:30s} | {feature_value:>12s} | {shap_value:>10.4f}\n"
+            )
+
+        # Example final print (for debugging). Then upload shap_text to S3 as before.
+        print("\nGenerated SHAP Text:\n", shap_text)
+
+        upload_force_plot_image_file = UploadFile(
+            filename="force_plot.png", file=io.BytesIO(image_data)
+        )
+        upload_force_plot_text_file = UploadFile(
+            filename="force_plot.text", file=io.BytesIO(shap_text.encode("utf-8"))
+        )
+
+        await s3_service.upload(
+            file=upload_force_plot_image_file,
+            file_path=force_plot_image_key,
+            session_id=session_id,
+        )
+        await s3_service.upload(
+            file=upload_force_plot_text_file,
+            file_path=force_plot_text_key,
+            session_id=session_id,
+        )
+
+        return {
+            attack_type: attack_type,
+            "data_point_id": data_point_id,
+            "force_plot_url": s3_service.get_url(
+                s3_key=force_plot_image_key, session_id=session_id, expiration=21600
+            )
+        }
+    except Exception as e:
+        print("ERROR", e)
+        return Response(status_code=400, content="Failed to retrieve data.")
 
 
 @router.get("/attack-detection/specific")
@@ -281,6 +478,7 @@ async def fetch_attack_records(
 
         attack_data = [
             {
+                "id": row["id"],
                 "timestamp": row["Timestamp"].isoformat(),
                 "flowBytesPerSecond": row["Flow Bytes/s"],
                 "flowDuration": row["Flow Duration"],
@@ -322,39 +520,45 @@ async def upload_file(
     s3_service: S3 = Depends(S3),
 ):
     """
-    Store file in S3 as a pickle.
+    Process the uploaded CSV file by:
+      1. Reading CSV data into a DataFrame.
+      2. Adding a unique 'id' column.
+      3. Cleaning data and dropping unnecessary columns.
+      4. Predicting labels using a pre-trained XGBoost model.
+      5. Uploading both the raw file and processed CSV to S3 in separate folders.
+      6. Storing the S3 key of the processed file in the Redis session.
     """
-
     # 1. Validate input file
     if not file:
-        raise ValueError("file missing")
+        raise ValueError("File missing")
 
+    # 2. Create a new session if necessary
     if not session_id:
-        # If the user doesn't have a session_id, create a new one
         session_id = str(uuid.uuid4())
-        # Set the cookie with a 5-minute expiration
         response.set_cookie(
             key=SESSION_COOKIE_NAME,
             value=session_id,
-            max_age=43200,
-            httponly=True,  # Prevents JavaScript access
-            secure=(
-                False if settings.STAGE == "local" else True
-            ),  # Set to True in production
-            samesite="lax",  # Adjust as needed
+            max_age=43200,  # 12 hours
+            httponly=True,
+            secure=(False if settings.STAGE == "local" else True),
+            samesite="lax",
         )
 
     try:
-        # 3. Read CSV into a pandas DataFrame
+        # 3. Read CSV into a DataFrame using pyarrow for speed/efficiency
         df = pd.read_csv(file.file, engine="pyarrow", dtype_backend="pyarrow")
 
-        meta_columns = ["Flow ID", "Timestamp", "Src IP", "Dst IP"]
-        # Make a copy to avoid altering these columns inadvertently
+        # 4. Add a unique 'id' column (using the DataFrame's index)
+        df.reset_index(drop=True, inplace=True)
+        df["id"] = df.index
+
+        # 5. Extract meta columns to preserve key identifiers
+        meta_columns = ["id", "Flow ID", "Timestamp", "Src IP", "Dst IP"]
         meta_df = df[meta_columns].copy()
 
-        # 4. Drop irrelevant columns
+        # 6. Drop columns not needed for model prediction.
+        #    (We want to keep 'id' so that we can reference rows later.)
         irrelevant_columns = [
-            "id",
             "Flow ID",
             "Attempted Category",
             "Timestamp",
@@ -365,19 +569,16 @@ async def upload_file(
         ]
         df.drop(columns=irrelevant_columns, axis=1, inplace=True, errors="ignore")
 
-        # 5. Clean data (handle inf/nan)
+        # 7. Clean data: replace infinities and drop any rows with missing values.
         df.replace([np.inf, -np.inf], np.nan, inplace=True)
         df.dropna(axis=0, how="any", inplace=True)
 
-        # 6. Load pre-trained XGBoost model and scaler
+        # 8. Load pre-trained model and scaler
         model = xgb.Booster()
-        load_model = os.path.join("model", "xgb_booster.model")
-        model.load_model(load_model)
+        model.load_model(os.path.join("model", "xgb_booster.model"))
+        scaler = joblib.load(os.path.join("model", "scaler.pkl"))
 
-        scaler_path = os.path.join("model", "scaler.pkl")
-        scaler = joblib.load(scaler_path)
-
-        # 7. Define features and transform
+        # 9. Define features that the model expects
         feature_cols = [
             "Src Port",
             "Dst Port",
@@ -394,38 +595,53 @@ async def upload_file(
         X_scaled = scaler.transform(X)
         dmatrix = xgb.DMatrix(X_scaled)
 
-        # 8. Predict classes
-        #    If your model outputs class probabilities (shape [n_samples, n_classes]),
-        #    then np.argmax along axis=1 is the typical way to get the class index.
+        # 10. Predict class probabilities and decode the labels
         predictions = model.predict(dmatrix)
         predicted_indices = np.argmax(predictions, axis=1)
-
-        # 9. Decode labels back to their string form
         label_encoder_path = os.path.join("model", "label_encoder.pkl")
         label_encoder = joblib.load(label_encoder_path)
         decoded_labels = label_encoder.inverse_transform(predicted_indices)
 
+        # 11. Attach the predicted labels to the DataFrame
         df["Label"] = decoded_labels
-        df = pd.concat([meta_df, df], axis=1)
 
-        # 10. Convert the DataFrame to a pickle in memory
-        buffer = io.BytesIO()
-        df.to_csv(buffer, index=False)
-        buffer.seek(0)
+        # 12. Re-combine meta data with the processed DataFrame
+        processed_df = pd.concat([meta_df, df], axis=1)
+        print(f"Processed DataFrame shape:\n{processed_df.head(10)}")
 
-        # 11. Create an UploadFile-like object for S3 upload
-        #     We'll call this `processed_file` instead of `csv_file`
-        processed_file = UploadFile(
-            filename=f"{file.filename}_processed.csv", file=buffer
-        )
+        # 13. Write the processed DataFrame to an in-memory CSV buffer
+        processed_buffer = io.BytesIO()
+        processed_df.to_csv(processed_buffer, index=False)
+        processed_buffer.seek(0)
 
-        # 12. Upload the pickle file to S3
-        upload_output = await s3_service.upload(
-            processed_file, processed_file.filename, session_id
-        )
-        s3_key = upload_output.get("s3_key")
+        # 14. Prepare UploadFile objects for raw and processed files.
+        #    Note: After reading the CSV, the file pointer is at the end,
+        #          so we must reset it to 0 to capture the raw file content.
+        file.file.seek(0)
+        raw_file = UploadFile(filename=f"{file.filename}", file=file.file)
+        processed_file = UploadFile(filename=f"{file.filename}", file=processed_buffer)
 
-        # 13. Store or update the session data in Redis with a 10-minute TTL
+        # Create two tasks for parallel uploads
+        upload_tasks = [
+            s3_service.upload(
+                file=raw_file,
+                file_path=f"network-file/raw/{raw_file.filename}",
+                session_id=session_id,
+            ),
+            s3_service.upload(
+                file=processed_file,
+                file_path=f"network-file/model-applied/{processed_file.filename}",
+                session_id=session_id,
+            ),
+        ]
+
+        # Run both upload tasks concurrently
+        _, processed_upload_output = await asyncio.gather(*upload_tasks)
+
+        # Retrieve the S3 key from the processed file upload
+        s3_key = processed_upload_output.get("s3_key")
+
+        # 17. Store or update the session data in Redis with the processed file's S3 key
         redis_client.set_session_data(session_id, s3_key, ttl_in_seconds=43200)
 
         return {
