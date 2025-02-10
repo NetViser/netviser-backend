@@ -46,8 +46,8 @@ async def get_attack_detection_xai(
     print("session_id", session_id)
 
     base_key = f"xai/{attack_type}/{data_point_id}"
-    force_plot_image_key = f"{base_key}/images/force_plot.png"
-    force_plot_text_key = f"{base_key}/texts/force_plot.text"
+    force_plot_image_key = f"{base_key}/force_plot/image.png"
+    force_plot_text_key = f"{base_key}/force_plot/value.text"
 
     # Check if both the image and SHAP text file already exist in S3.
     if await s3_service.file_exists(
@@ -228,7 +228,65 @@ async def get_attack_detection_xai(
         return Response(status_code=400, content="Failed to retrieve data.")
 
 
-@router.get("/individual/explanation")
+# @router.get("/individual/explanation")
+# async def get_attack_detection_xai_explanation(
+#     attack_type: str,
+#     data_point_id: int,
+#     session_id: Optional[str] = Cookie(None),
+#     s3_service: S3 = Depends(S3),
+#     gemini_service: GeminiService = Depends(GeminiService),
+# ):
+#     # Validate the session cookie
+#     if not session_id:
+#         raise HTTPException(status_code=400, detail="Session ID missing")
+
+#     # Retrieve session data from Redis
+#     try:
+#         session_data = redis_client.get_session_data(session_id)
+#         if not session_data:
+#             raise HTTPException(status_code=400, detail="Session expired or not found")
+#     except Exception as exc:
+#         # Optionally log the exception: logger.error(f"Session retrieval error: {exc}")
+#         raise HTTPException(status_code=400, detail="Error retrieving session data")
+
+#     # Build the key for the SHAP force plot text file
+#     base_key = f"xai/{attack_type}/{data_point_id}"
+#     force_plot_text_key = f"{base_key}/force_plot/value.text"
+#     gemini_explanation_key = f"{base_key}/force_plot/explanation.text"
+
+#     # Check if the file exists in S3
+#     try:
+#         file_exists = await s3_service.file_exists(filename=force_plot_text_key, session_id=session_id)
+#     except Exception as exc:
+#         # Optionally log the exception: logger.error(f"S3 file existence check error: {exc}")
+#         raise HTTPException(status_code=500, detail="Error checking S3 for force plot text file")
+
+#     if not file_exists:
+#         raise HTTPException(
+#             status_code=400,
+#             detail=f"Explanation not found for {attack_type} {data_point_id}.",
+#         )
+
+#     # Read the SHAP text file from S3
+#     try:
+#         shap_txt_data = await s3_service.read(f"uploads/{session_id}/{force_plot_text_key}")
+#         shap_text = shap_txt_data.decode("utf-8")
+#     except Exception as exc:
+#         # Optionally log the exception: logger.error(f"Error reading SHAP text file: {exc}")
+#         raise HTTPException(status_code=500, detail="Error reading SHAP text file from S3")
+
+#     # Generate the explanation using Gemini
+#     try:
+#         explanation = gemini_service.generate_shap_force_plot_explanation(shap_text)
+#     except Exception as exc:
+#         print("ERROR", exc)
+#         # Optionally log the exception: logger.error(f"Gemini API error: {exc}")
+#         raise HTTPException(status_code=500, detail="Error generating explanation from Gemini API")
+
+#     return {"explanation": explanation}
+
+
+@router.get("/individual/explaination")
 async def get_attack_detection_xai_explanation(
     attack_type: str,
     data_point_id: int,
@@ -249,37 +307,89 @@ async def get_attack_detection_xai_explanation(
         # Optionally log the exception: logger.error(f"Session retrieval error: {exc}")
         raise HTTPException(status_code=400, detail="Error retrieving session data")
 
-    # Build the key for the SHAP force plot text file
+    # Build the keys for the force plot text file and the Gemini explanation file
     base_key = f"xai/{attack_type}/{data_point_id}"
-    force_plot_text_key = f"{base_key}/texts/force_plot.text"
+    force_plot_text_key = f"{base_key}/force_plot/value.text"
+    gemini_explanation_key = f"{base_key}/force_plot/explanation.text"
 
-    # Check if the file exists in S3
+    # Check if the SHAP force plot text file exists in S3
     try:
-        file_exists = await s3_service.file_exists(filename=force_plot_text_key, session_id=session_id)
+        file_exists = await s3_service.file_exists(
+            filename=force_plot_text_key, session_id=session_id
+        )
     except Exception as exc:
         # Optionally log the exception: logger.error(f"S3 file existence check error: {exc}")
-        raise HTTPException(status_code=500, detail="Error checking S3 for force plot text file")
+        raise HTTPException(
+            status_code=500, detail="Error checking S3 for force plot text file"
+        )
 
     if not file_exists:
         raise HTTPException(
             status_code=400,
-            detail=f"Explanation not found for {attack_type} {data_point_id}.",
+            detail=f"Force plot text not found for {attack_type} {data_point_id}.",
         )
 
-    # Read the SHAP text file from S3
+    # Check if the Gemini explanation file already exists in S3; if so, return it directly.
     try:
-        shap_txt_data = await s3_service.read(f"uploads/{session_id}/{force_plot_text_key}")
+        explanation_exists = await s3_service.file_exists(
+            filename=gemini_explanation_key, session_id=session_id
+        )
+    except Exception as exc:
+        # Optionally log the exception: logger.error(f"S3 explanation file check error: {exc}")
+        raise HTTPException(
+            status_code=500, detail="Error checking S3 for explanation file"
+        )
+
+    if explanation_exists:
+        try:
+            explanation_data = await s3_service.read(
+                f"uploads/{session_id}/{gemini_explanation_key}"
+            )
+            explanation_text = explanation_data.decode("utf-8")
+            return {"explanation": explanation_text}
+        except Exception as exc:
+            # Optionally log the exception: logger.error(f"Error reading explanation file: {exc}")
+            raise HTTPException(
+                status_code=500, detail="Error reading explanation file from S3"
+            )
+
+    # Read the SHAP force plot text file from S3
+    try:
+        shap_txt_data = await s3_service.read(
+            f"uploads/{session_id}/{force_plot_text_key}"
+        )
         shap_text = shap_txt_data.decode("utf-8")
     except Exception as exc:
         # Optionally log the exception: logger.error(f"Error reading SHAP text file: {exc}")
-        raise HTTPException(status_code=500, detail="Error reading SHAP text file from S3")
+        raise HTTPException(
+            status_code=500, detail="Error reading SHAP text file from S3"
+        )
 
     # Generate the explanation using Gemini
     try:
         explanation = gemini_service.generate_shap_force_plot_explanation(shap_text)
     except Exception as exc:
-        print("ERROR", exc)
         # Optionally log the exception: logger.error(f"Gemini API error: {exc}")
-        raise HTTPException(status_code=500, detail="Error generating explanation from Gemini API")
+        raise HTTPException(
+            status_code=500, detail="Error generating explanation from Gemini API"
+        )
+
+    # Save the generated explanation to S3 for future reuse
+    try:
+        from fastapi import UploadFile  # Ensure UploadFile is imported
+        import io
+
+        upload_explanation_file = UploadFile(
+            filename="explanation.text", file=io.BytesIO(explanation.encode("utf-8"))
+        )
+        await s3_service.upload(
+            file=upload_explanation_file,
+            file_path=gemini_explanation_key,
+            session_id=session_id,
+        )
+    except Exception as exc:
+        # Optionally log the exception: logger.error(f"Error saving explanation file: {exc}")
+        # Do not block the response if saving fails; simply log the error.
+        print("Warning: Failed to save explanation file to S3:", exc)
 
     return {"explanation": explanation}
