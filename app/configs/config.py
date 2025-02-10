@@ -13,10 +13,12 @@ class Settings(BaseSettings):
     REDIS_USERNAME: Optional[str] = None
     REDIS_PASSWORD: Optional[str] = None
 
+    GEMINI_API_KEY: Optional[str] = None
+    GEMINI_MODEL: Optional[str] = None
+
     STAGE: Optional[str] = None
 
     model_config = SettingsConfigDict(env_file=".env")
-
 
 def get_settings() -> Settings:
     return Settings()

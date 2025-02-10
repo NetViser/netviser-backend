@@ -1,8 +1,10 @@
+import asyncio
 from collections import Counter
 import io
 import uuid
 
 import numpy as np
+from app.services.gemini_service import GeminiService
 from app.services.redis_service import RedisClient
 from fastapi import (
     APIRouter,
@@ -20,6 +22,7 @@ import xgboost as xgb
 import pandas as pd
 import os
 import joblib
+import shap
 from app.services.s3_service import S3
 from app.services.input_handle_service import preprocess
 
@@ -281,6 +284,7 @@ async def fetch_attack_records(
 
         attack_data = [
             {
+                "id": row["id"],
                 "timestamp": row["Timestamp"].isoformat(),
                 "flowBytesPerSecond": row["Flow Bytes/s"],
                 "flowDuration": row["Flow Duration"],
@@ -322,39 +326,45 @@ async def upload_file(
     s3_service: S3 = Depends(S3),
 ):
     """
-    Store file in S3 as a pickle.
+    Process the uploaded CSV file by:
+      1. Reading CSV data into a DataFrame.
+      2. Adding a unique 'id' column.
+      3. Cleaning data and dropping unnecessary columns.
+      4. Predicting labels using a pre-trained XGBoost model.
+      5. Uploading both the raw file and processed CSV to S3 in separate folders.
+      6. Storing the S3 key of the processed file in the Redis session.
     """
-
     # 1. Validate input file
     if not file:
-        raise ValueError("file missing")
+        raise ValueError("File missing")
 
+    # 2. Create a new session if necessary
     if not session_id:
-        # If the user doesn't have a session_id, create a new one
         session_id = str(uuid.uuid4())
-        # Set the cookie with a 5-minute expiration
         response.set_cookie(
             key=SESSION_COOKIE_NAME,
             value=session_id,
-            max_age=43200,
-            httponly=True,  # Prevents JavaScript access
-            secure=(
-                False if settings.STAGE == "local" else True
-            ),  # Set to True in production
-            samesite="lax",  # Adjust as needed
+            max_age=43200,  # 12 hours
+            httponly=True,
+            secure=(False if settings.STAGE == "local" else True),
+            samesite="lax",
         )
 
     try:
-        # 3. Read CSV into a pandas DataFrame
+        # 3. Read CSV into a DataFrame using pyarrow for speed/efficiency
         df = pd.read_csv(file.file, engine="pyarrow", dtype_backend="pyarrow")
 
-        meta_columns = ["Flow ID", "Timestamp", "Src IP", "Dst IP"]
-        # Make a copy to avoid altering these columns inadvertently
+        # 4. Add a unique 'id' column (using the DataFrame's index)
+        df.reset_index(drop=True, inplace=True)
+        df["id"] = df.index
+
+        # 5. Extract meta columns to preserve key identifiers
+        meta_columns = ["id", "Flow ID", "Timestamp", "Src IP", "Dst IP"]
         meta_df = df[meta_columns].copy()
 
-        # 4. Drop irrelevant columns
+        # 6. Drop columns not needed for model prediction.
+        #    (We want to keep 'id' so that we can reference rows later.)
         irrelevant_columns = [
-            "id",
             "Flow ID",
             "Attempted Category",
             "Timestamp",
@@ -365,19 +375,16 @@ async def upload_file(
         ]
         df.drop(columns=irrelevant_columns, axis=1, inplace=True, errors="ignore")
 
-        # 5. Clean data (handle inf/nan)
+        # 7. Clean data: replace infinities and drop any rows with missing values.
         df.replace([np.inf, -np.inf], np.nan, inplace=True)
         df.dropna(axis=0, how="any", inplace=True)
 
-        # 6. Load pre-trained XGBoost model and scaler
+        # 8. Load pre-trained model and scaler
         model = xgb.Booster()
-        load_model = os.path.join("model", "xgb_booster.model")
-        model.load_model(load_model)
+        model.load_model(os.path.join("model", "xgb_booster.model"))
+        scaler = joblib.load(os.path.join("model", "scaler.pkl"))
 
-        scaler_path = os.path.join("model", "scaler.pkl")
-        scaler = joblib.load(scaler_path)
-
-        # 7. Define features and transform
+        # 9. Define features that the model expects
         feature_cols = [
             "Src Port",
             "Dst Port",
@@ -394,38 +401,53 @@ async def upload_file(
         X_scaled = scaler.transform(X)
         dmatrix = xgb.DMatrix(X_scaled)
 
-        # 8. Predict classes
-        #    If your model outputs class probabilities (shape [n_samples, n_classes]),
-        #    then np.argmax along axis=1 is the typical way to get the class index.
+        # 10. Predict class probabilities and decode the labels
         predictions = model.predict(dmatrix)
         predicted_indices = np.argmax(predictions, axis=1)
-
-        # 9. Decode labels back to their string form
         label_encoder_path = os.path.join("model", "label_encoder.pkl")
         label_encoder = joblib.load(label_encoder_path)
         decoded_labels = label_encoder.inverse_transform(predicted_indices)
 
+        # 11. Attach the predicted labels to the DataFrame
         df["Label"] = decoded_labels
-        df = pd.concat([meta_df, df], axis=1)
 
-        # 10. Convert the DataFrame to a pickle in memory
-        buffer = io.BytesIO()
-        df.to_csv(buffer, index=False)
-        buffer.seek(0)
+        # 12. Re-combine meta data with the processed DataFrame
+        processed_df = pd.concat([meta_df, df], axis=1)
+        print(f"Processed DataFrame shape:\n{processed_df.head(10)}")
 
-        # 11. Create an UploadFile-like object for S3 upload
-        #     We'll call this `processed_file` instead of `csv_file`
-        processed_file = UploadFile(
-            filename=f"{file.filename}_processed.csv", file=buffer
-        )
+        # 13. Write the processed DataFrame to an in-memory CSV buffer
+        processed_buffer = io.BytesIO()
+        processed_df.to_csv(processed_buffer, index=False)
+        processed_buffer.seek(0)
 
-        # 12. Upload the pickle file to S3
-        upload_output = await s3_service.upload(
-            processed_file, processed_file.filename, session_id
-        )
-        s3_key = upload_output.get("s3_key")
+        # 14. Prepare UploadFile objects for raw and processed files.
+        #    Note: After reading the CSV, the file pointer is at the end,
+        #          so we must reset it to 0 to capture the raw file content.
+        file.file.seek(0)
+        raw_file = UploadFile(filename=f"{file.filename}", file=file.file)
+        processed_file = UploadFile(filename=f"{file.filename}", file=processed_buffer)
 
-        # 13. Store or update the session data in Redis with a 10-minute TTL
+        # Create two tasks for parallel uploads
+        upload_tasks = [
+            s3_service.upload(
+                file=raw_file,
+                file_path=f"network-file/raw/{raw_file.filename}",
+                session_id=session_id,
+            ),
+            s3_service.upload(
+                file=processed_file,
+                file_path=f"network-file/model-applied/{processed_file.filename}",
+                session_id=session_id,
+            ),
+        ]
+
+        # Run both upload tasks concurrently
+        _, processed_upload_output = await asyncio.gather(*upload_tasks)
+
+        # Retrieve the S3 key from the processed file upload
+        s3_key = processed_upload_output.get("s3_key")
+
+        # 17. Store or update the session data in Redis with the processed file's S3 key
         redis_client.set_session_data(session_id, s3_key, ttl_in_seconds=43200)
 
         return {
@@ -474,7 +496,7 @@ async def get_attack_detection_brief_scatter(
 
         benign_data = [
             {"timestamp": row["Timestamp"].isoformat(), "value": row["Flow Bytes/s"]}
-            for row in not data_frame[~data_frame["is_attack"]]
+            for row in data_frame[~data_frame["is_attack"]]
             .dropna()
             .to_dict(orient="records")
         ]
