@@ -1,9 +1,13 @@
 import importlib
 import os
 from fastapi import APIRouter, FastAPI
+from app.routes.xai.xai_routes import router as xai_router
 from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
+
+# Include the XAI router
+app.include_router(xai_router)
 
 origins = [
     "http://localhost:3000",  # Frontend URL
