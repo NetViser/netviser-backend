@@ -367,24 +367,35 @@ async def get_attack_detection_xai_summary(
             detail="Error retrieving session data",
         )
 
-    # Check if bar-summary CSV exists in S3
+    # Check if both bar-summary CSV and beeswarm summary CSV exist in S3.
+    # If they do, read and return them directly.
     base_key = f"xai/{attack_type}/summary"
     bar_summary_key = f"{base_key}/bar_summary/value.csv"
     beeswarm_summary_key = f"{base_key}/beeswarm_summary/value.csv"
-    # try:
-    #     csv_exists = await s3_service.file_exists(
-    #         filename=bar_summary_key, session_id=session_id
-    #     )
-    #     if csv_exists:
-    #         bar_summary_data = await s3_service.read(
-    #             f"uploads/{session_id}/{bar_summary_key}"
-    #         )
-
-    #         bar_summary_df = pd.read_csv(io.BytesIO(bar_summary_data))
-    #         print("bar_summary_df\n", bar_summary_df)
-    #         return {"bar_summary": bar_summary_df.to_dict(orient="records")}
-    # except Exception:
-    # .    pass  # Not a hard failure, continue to generate the CSV
+    try:
+        bar_csv_exists = await s3_service.file_exists(
+            filename=bar_summary_key, session_id=session_id
+        )
+        beeswarm_csv_exists = await s3_service.file_exists(
+            filename=beeswarm_summary_key, session_id=session_id
+        )
+        if bar_csv_exists and beeswarm_csv_exists:
+            bar_summary_data = await s3_service.read(
+                f"uploads/{session_id}/{bar_summary_key}"
+            )
+            beeswarm_summary_data = await s3_service.read(
+                f"uploads/{session_id}/{beeswarm_summary_key}"
+            )
+            bar_summary_df = pd.read_csv(io.BytesIO(bar_summary_data))
+            beeswarm_summary_df = pd.read_csv(io.BytesIO(beeswarm_summary_data))
+            print("bar_summary_df\n", bar_summary_df)
+            return {
+                "bar_summary": bar_summary_df.to_dict(orient="records"),
+                "beeswarm_summary": beeswarm_summary_df.to_dict(orient="records"),
+            }
+    except Exception:
+        # Not a hard failure; if checking/reading fails, proceed to compute the CSVs.
+        pass
 
     # Compute the SHAP-based summary
     try:
