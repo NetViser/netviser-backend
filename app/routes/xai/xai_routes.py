@@ -8,13 +8,12 @@ from app.services.gemini_service import GeminiService
 from app.services.redis_service import RedisClient
 from fastapi import (
     APIRouter,
-    File,
-    Response,
-    UploadFile,
     Cookie,
     Depends,
     HTTPException,
-    Query,
+    Response,
+    UploadFile,
+    status,
 )
 from typing import Optional
 from app.configs.config import get_settings
@@ -25,6 +24,7 @@ import joblib
 import shap
 from app.services.s3_service import S3
 from app.services.input_handle_service import preprocess
+from app.services.xai_service import compute_beeswarm_jitter, normalize_feature
 
 router = APIRouter(prefix="/api/attack-detection/xai", tags=["xai"])
 settings = get_settings()
@@ -228,64 +228,6 @@ async def get_attack_detection_xai(
         return Response(status_code=400, content="Failed to retrieve data.")
 
 
-# @router.get("/individual/explanation")
-# async def get_attack_detection_xai_explanation(
-#     attack_type: str,
-#     data_point_id: int,
-#     session_id: Optional[str] = Cookie(None),
-#     s3_service: S3 = Depends(S3),
-#     gemini_service: GeminiService = Depends(GeminiService),
-# ):
-#     # Validate the session cookie
-#     if not session_id:
-#         raise HTTPException(status_code=400, detail="Session ID missing")
-
-#     # Retrieve session data from Redis
-#     try:
-#         session_data = redis_client.get_session_data(session_id)
-#         if not session_data:
-#             raise HTTPException(status_code=400, detail="Session expired or not found")
-#     except Exception as exc:
-#         # Optionally log the exception: logger.error(f"Session retrieval error: {exc}")
-#         raise HTTPException(status_code=400, detail="Error retrieving session data")
-
-#     # Build the key for the SHAP force plot text file
-#     base_key = f"xai/{attack_type}/{data_point_id}"
-#     force_plot_text_key = f"{base_key}/force_plot/value.text"
-#     gemini_explanation_key = f"{base_key}/force_plot/explanation.text"
-
-#     # Check if the file exists in S3
-#     try:
-#         file_exists = await s3_service.file_exists(filename=force_plot_text_key, session_id=session_id)
-#     except Exception as exc:
-#         # Optionally log the exception: logger.error(f"S3 file existence check error: {exc}")
-#         raise HTTPException(status_code=500, detail="Error checking S3 for force plot text file")
-
-#     if not file_exists:
-#         raise HTTPException(
-#             status_code=400,
-#             detail=f"Explanation not found for {attack_type} {data_point_id}.",
-#         )
-
-#     # Read the SHAP text file from S3
-#     try:
-#         shap_txt_data = await s3_service.read(f"uploads/{session_id}/{force_plot_text_key}")
-#         shap_text = shap_txt_data.decode("utf-8")
-#     except Exception as exc:
-#         # Optionally log the exception: logger.error(f"Error reading SHAP text file: {exc}")
-#         raise HTTPException(status_code=500, detail="Error reading SHAP text file from S3")
-
-#     # Generate the explanation using Gemini
-#     try:
-#         explanation = gemini_service.generate_shap_force_plot_explanation(shap_text)
-#     except Exception as exc:
-#         print("ERROR", exc)
-#         # Optionally log the exception: logger.error(f"Gemini API error: {exc}")
-#         raise HTTPException(status_code=500, detail="Error generating explanation from Gemini API")
-
-#     return {"explanation": explanation}
-
-
 @router.get("/individual/explaination")
 async def get_attack_detection_xai_explanation(
     attack_type: str,
@@ -393,3 +335,226 @@ async def get_attack_detection_xai_explanation(
         print("Warning: Failed to save explanation file to S3:", exc)
 
     return {"explanation": explanation}
+
+
+@router.get("/summary")
+async def get_attack_detection_xai_summary(
+    attack_type: str,
+    session_id: Optional[str] = Cookie(None),
+    s3_service: S3 = Depends(S3),
+):
+    """
+    Retrieve or generate a SHAP bar-summary CSV for the specified attack_type
+    and session_id from S3. If the CSV does not exist, compute and upload it.
+    """
+    # Validate session_id
+    if not session_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Session ID missing"
+        )
+
+    # Retrieve session data from Redis
+    try:
+        session_data = redis_client.get_session_data(session_id)
+        if not session_data:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Session expired or not found",
+            )
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Error retrieving session data",
+        )
+
+    # Check if bar-summary CSV exists in S3
+    base_key = f"xai/{attack_type}/summary"
+    bar_summary_key = f"{base_key}/bar_summary/value.csv"
+    beeswarm_summary_key = f"{base_key}/beeswarm_summary/value.csv"
+    # try:
+    #     csv_exists = await s3_service.file_exists(
+    #         filename=bar_summary_key, session_id=session_id
+    #     )
+    #     if csv_exists:
+    #         bar_summary_data = await s3_service.read(
+    #             f"uploads/{session_id}/{bar_summary_key}"
+    #         )
+
+    #         bar_summary_df = pd.read_csv(io.BytesIO(bar_summary_data))
+    #         print("bar_summary_df\n", bar_summary_df)
+    #         return {"bar_summary": bar_summary_df.to_dict(orient="records")}
+    # except Exception:
+    #.    pass  # Not a hard failure, continue to generate the CSV
+
+    # Compute the SHAP-based summary
+    try:
+        session_data = redis_client.get_session_data(session_id)
+        if not session_data:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Session Expired or not found",
+            )
+
+        # Load dataset from S3
+        file_data = await s3_service.read(session_data)
+        file_like_object = io.BytesIO(file_data)
+        df = pd.read_csv(file_like_object, engine="pyarrow", dtype_backend="pyarrow")
+        df.reset_index(drop=True, inplace=True)
+
+        # Load model artifacts
+        model = xgb.Booster()
+        model_path = os.path.join("model", "xgb_booster.model")
+        scaler_path = os.path.join("model", "scaler.pkl")
+        label_enc_path = os.path.join("model", "label_encoder.pkl")
+
+        try:
+            model.load_model(model_path)
+            scaler = joblib.load(scaler_path)
+            label_encoder = joblib.load(label_enc_path)
+        except FileNotFoundError:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Model or scaler file missing on the server.",
+            )
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to load model artifacts.",
+            )
+
+        explainer = shap.TreeExplainer(model)
+
+        # Prepare features & compute SHAP
+        feature_cols = [
+            "Src Port",
+            "Dst Port",
+            "Total TCP Flow Time",
+            "Bwd Init Win Bytes",
+            "Bwd Packet Length Std",
+            "Total Length of Fwd Packet",
+            "Fwd Packet Length Max",
+            "Bwd IAT Mean",
+            "Flow IAT Min",
+            "Fwd PSH Flags",
+        ]
+        X = df[feature_cols]
+        X_scaled = scaler.transform(X)
+        X_scaled_df = pd.DataFrame(X_scaled, columns=feature_cols)
+
+        shap_values = explainer.shap_values(X_scaled_df)
+        print("shap_values\n", shap_values[0])
+
+        # Extract SHAP values for the requested attack_type
+        try:
+            attack_class_index = label_encoder.transform([attack_type])[0]
+            print("attack_class_index", attack_class_index)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"'{attack_type}' not recognized in model classes.",
+            )
+
+        shap_values_attack_class = shap_values[..., attack_class_index]
+        print("after shap_values_attack_class")
+
+        # Compute csv data for bar summary
+        mean_abs_shap_values = np.mean(np.abs(shap_values_attack_class), axis=0)
+        print("after mean_abs_shap_values")
+        sorted_idx = np.argsort(mean_abs_shap_values)
+        print("after sorted_idx")
+        sorted_features_desc = [feature_cols[i] for i in sorted_idx[::-1]]
+        print("after sorted_features_desc")
+        sorted_importances_desc = mean_abs_shap_values[sorted_idx[::-1]]
+
+        # Create DataFrame & upload to S3
+        bar_summary_df = pd.DataFrame(
+            {"feature": sorted_features_desc, "mean_abs_shap": sorted_importances_desc}
+        )
+        print("bar_summary_df\n", bar_summary_df)
+        bar_summary_csv_buffer = io.BytesIO()
+        bar_summary_df.to_csv(bar_summary_csv_buffer, index=False)
+        bar_summary_csv_buffer.seek(0)
+
+        await s3_service.upload(
+            file=UploadFile(file=bar_summary_csv_buffer),
+            file_path=bar_summary_key,
+            session_id=session_id,
+        )
+
+        # Compute csv data for beeswarm summary
+        shap_df = pd.DataFrame(shap_values_attack_class, columns=X_scaled_df.columns)
+        shap_df["index"] = shap_df.index
+        shap_df = shap_df.melt(
+            id_vars=["index"], var_name="feature", value_name="shap_value"
+        )
+        # Melt the continuous feature values from the scaled data (for color mapping)
+        feature_vals = X_scaled_df.melt(ignore_index=False).reset_index()
+        feature_vals.columns = ["index", "feature", "feature_value"]
+        # Merge SHAP values with the scaled feature values
+        melted_df = shap_df.merge(feature_vals, on=["index", "feature"])
+        # Also melt the original (unscaled) feature values for hover display
+        orig_vals = X.melt(ignore_index=False).reset_index()
+        orig_vals.columns = ["index", "feature", "original_feature_value"]
+        melted_df = melted_df.merge(orig_vals, on=["index", "feature"])
+        # Compute percentile-based normalized value per feature using the scaled "Feature Value"
+        melted_df["normalized_feature_value"] = melted_df.groupby("feature")[
+            "feature_value"
+        ].transform(normalize_feature)
+        # -------------------------
+        # Prepare for Beeswarm Plotting
+        # -------------------------
+        # Order features (for example, by average absolute SHAP value)
+        feature_order = (
+            melted_df.groupby("feature")["shap_value"]
+            .apply(lambda x: np.mean(np.abs(x)))
+            .sort_values(ascending=True)
+            .index.tolist()
+        )
+        # Map each feature to a numeric y-value for plotting
+        feature_mapping = {feature: i for i, feature in enumerate(feature_order)}
+        # After computing feature_mapping (which maps each feature to a base numeric y value),
+        # replace the uniform jitter with a jitter computed per feature based on the SHAP value distribution.
+        np.random.seed(42)
+        # Instead of:
+        # melted_df["y_jitter"] = melted_df["Feature"].map(feature_mapping) + np.random.uniform(-0.3, 0.3, size=len(melted_df))
+        # we compute a per-feature jitter:
+        # First compute the jitter offset per feature:
+        melted_df["jitter_offset"] = melted_df.groupby("feature")[
+            "shap_value"
+        ].transform(
+            lambda s: pd.Series(
+                compute_beeswarm_jitter(s.values, row_height=0.4), index=s.index
+            )
+        )
+
+        # Then add the base y value from feature_mapping to the computed offset:
+        melted_df["y_jitter"] = (
+            melted_df["feature"].map(feature_mapping) + melted_df["jitter_offset"]
+        )
+        melted_df.drop(
+            columns=["feature_value", "jitter_offset", "index"], inplace=True
+        )
+
+        # Upload the beeswarm summary CSV to S3
+        beeswarm_summary_df = melted_df.copy()
+        beeswarm_summary_csv_buffer = io.BytesIO()
+        beeswarm_summary_df.to_csv(beeswarm_summary_csv_buffer, index=False)
+        beeswarm_summary_csv_buffer.seek(0)
+
+        await s3_service.upload(
+            file=UploadFile(file=beeswarm_summary_csv_buffer),
+            file_path=beeswarm_summary_key,
+            session_id=session_id,
+        )
+
+        return {
+            "bar_summary": bar_summary_df.to_dict(orient="records"),
+            "beeswarm_summary": {}# beeswarm_summary_df.to_dict(orient="records"),
+        }
+
+    except Exception as e:
+        print("ERROR", e)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Failed to retrieve or process data.",
+        )
