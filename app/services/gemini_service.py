@@ -1,10 +1,10 @@
-
 from fastapi import HTTPException
 from app.configs.config import get_settings
 from google import genai
 from google.genai import types
 
 settings = get_settings()
+
 
 class GeminiService:
     """
@@ -27,13 +27,17 @@ class GeminiService:
         try:
             self.client = genai.Client(api_key=settings.GEMINI_API_KEY)
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Error initializing Gemini client: {str(e)}")
+            raise HTTPException(
+                status_code=500, detail=f"Error initializing Gemini client: {str(e)}"
+            )
 
-    def generate_shap_force_plot_explanation(self, input_shap_force_plot_data: str, max_tokens: int = 1000) -> str:
+    def generate_shap_force_plot_explanation(
+        self, input_shap_force_plot_data: str, max_tokens: int = 1000
+    ) -> str:
         """
         Generate a text explanation for the provided SHAP force plot data using Gemini 2.0 Flash.
         This method uses a predefined few-shot prompt template to guide the explanation generation.
-        
+
         :param input_shap_force_plot_data: The SHAP force plot data to be explained.
         :param max_tokens: Maximum number of tokens for the output text (default: 1000).
         :return: The generated explanation text.
@@ -87,9 +91,81 @@ Provide a single-paragraph explanation in the same style as **Example 1**, using
             response = self.client.models.generate_content(
                 model=settings.GEMINI_MODEL,  # e.g., "gemini-2.0-flash"
                 contents=[few_shot_prompt],
-                config=types.GenerateContentConfig(max_output_tokens=max_tokens)
+                config=types.GenerateContentConfig(max_output_tokens=max_tokens),
             )
             return response.text
         except Exception as e:
             print(f"Error generating SHAP force plot explanation: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Gemini API error: {str(e)}")
+
+    def generate_shap_summary_bar_explanation(
+        self, input_shap_summary_bar_data: str, attackType: str, max_tokens: int = 1000
+    ) -> str:
+        """
+        Generate a plain-language explanation for class-specific SHAP summary bar data using Gemini 2.0 Flash.
+        The SHAP summary bar plot shows, for a specific attack class, the average impact (mean absolute SHAP value)
+        of each feature on the model’s decision. This function uses the provided data for an attack class (e.g., FTP-Patator)
+        and generates a beginner-friendly explanation that describes what the plot indicates and why the top features are important.
+
+        :param input_shap_summary_bar_data: A CSV-formatted string with columns 'feature' and 'mean_abs_shap'
+                                            representing the average impact of each feature.
+        :param attackType: The name of the attack class (e.g., "FTP-Patator").
+        :param max_tokens: Maximum number of tokens for the output text (default: 1000).
+        :return: A single-paragraph explanation in beginner-friendly language.
+        :raises HTTPException: If the Gemini API call fails.
+        """
+        few_shot_prompt = f"""
+**System/Instruction:**
+You are an expert in explaining machine learning model predictions, especially using SHAP (SHapley Additive exPlanations) values. Your goal is to produce a single, clear paragraph that a beginner can understand. In your explanation, please:
+
+1. Explain what a SHAP summary bar plot is and how it shows the average impact of each feature on the model’s decision for a specific attack class.
+2. Highlight the top features (i.e., those with the highest mean absolute SHAP values) in the provided data.
+3. Describe in simple terms why these top features might be important for identifying the {attackType} attack.
+4. Avoid heavy technical jargon and keep the language accessible to someone new to these concepts.
+5. Follow the style shown in the example below.
+
+---
+
+**Example:**
+
+**Input Data (for FTP-Patator Attack Class):**
+```
+feature,mean_abs_shap
+Dst Port,0.7199564
+Bwd IAT Mean,0.13455594
+Src Port,0.116916336
+Total TCP Flow Time,0.077268235
+Bwd Packet Length Std,0.008266339
+Total Length of Fwd Packet,0.0025192727
+Fwd Packet Length Max,0.0020686889
+Fwd PSH Flags,0.0
+Flow IAT Min,0.0
+Bwd Init Win Bytes,0.0
+```
+
+**Output Explanation:**
+```
+This SHAP summary bar plot for FTP-Patator shows the average influence of each feature on the model’s decision. The feature “Dst Port” has the highest value (0.7199564), suggesting that the destination port is a key indicator of this attack, possibly because certain ports are frequently targeted. Other features like “Bwd IAT Mean” (0.13455594) and “Src Port” (0.116916336) also contribute by highlighting patterns in connection timing and source port usage.
+```
+
+---
+
+**New Input Data for {attackType} Attack:**
+```
+{input_shap_summary_bar_data}
+```
+
+**Your Task:**
+Provide a single-paragraph explanation that follows the guidelines above and is similar in style to the example.
+"""
+
+        try:
+            response = self.client.models.generate_content(
+                model=settings.GEMINI_MODEL,  # e.g., "gemini-2.0-flash"
+                contents=[few_shot_prompt],
+                config=types.GenerateContentConfig(max_output_tokens=max_tokens),
+            )
+            return response.text
+        except Exception as e:
+            print(f"Error generating SHAP summary bar explanation: {str(e)}")
             raise HTTPException(status_code=500, detail=f"Gemini API error: {str(e)}")

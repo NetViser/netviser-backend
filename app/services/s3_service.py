@@ -107,19 +107,29 @@ class S3:
             raise HTTPException(
                 status_code=500, detail="Failed to generate presigned URL."
             ) from e
-        
-    def get_url(self, s3_key: str, expiration: int = 3600, session_id: Optional[str] = Cookie(None)) -> str:
+
+    def get_url(
+        self,
+        s3_key: str,
+        expiration: int = 3600,
+        session_id: Optional[str] = Cookie(None),
+    ) -> str:
         try:
             print("Get url", f"{self.path_prefix}/{session_id}/{s3_key}")
             url = self.client.generate_presigned_url(
                 "get_object",
-                Params={"Bucket": self.bucket_name, "Key": f"{self.path_prefix}/{session_id}/{s3_key}"},
-                ExpiresIn=expiration
+                Params={
+                    "Bucket": self.bucket_name,
+                    "Key": f"{self.path_prefix}/{session_id}/{s3_key}",
+                },
+                ExpiresIn=expiration,
             )
             print("URL", url)
             return url
         except ClientError as e:
-            raise HTTPException(status_code=500, detail="Failed to generate get URL.") from e
+            raise HTTPException(
+                status_code=500, detail="Failed to generate get URL."
+            ) from e
 
     async def upload(
         self,

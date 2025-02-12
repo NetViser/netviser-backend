@@ -25,5 +25,3 @@ async def preprocess(file_like_object):
     data_frame.set_index("Timestamp", inplace=True)
 
     return data_frame
-
-

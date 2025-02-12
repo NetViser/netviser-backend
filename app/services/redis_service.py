@@ -6,6 +6,7 @@ import json
 
 settings = get_settings()
 
+
 class RedisClient:
     """
     Singleton class for interacting with Redis.
@@ -34,7 +35,7 @@ class RedisClient:
         self,
         session_id: str,
         data: Dict[str, Any],
-        ttl_in_seconds: int = 300  # Default to 5 minutes
+        ttl_in_seconds: int = 300,  # Default to 5 minutes
     ) -> None:
         """
         Store session data in Redis with an optional TTL (default 5 minutes).

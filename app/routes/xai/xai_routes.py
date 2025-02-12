@@ -228,7 +228,7 @@ async def get_attack_detection_xai(
         return Response(status_code=400, content="Failed to retrieve data.")
 
 
-@router.get("/individual/explaination")
+@router.get("/individual/explanation")
 async def get_attack_detection_xai_explanation(
     attack_type: str,
     data_point_id: int,
@@ -384,7 +384,7 @@ async def get_attack_detection_xai_summary(
     #         print("bar_summary_df\n", bar_summary_df)
     #         return {"bar_summary": bar_summary_df.to_dict(orient="records")}
     # except Exception:
-    #.    pass  # Not a hard failure, continue to generate the CSV
+    # .    pass  # Not a hard failure, continue to generate the CSV
 
     # Compute the SHAP-based summary
     try:
@@ -481,7 +481,7 @@ async def get_attack_detection_xai_summary(
             session_id=session_id,
         )
 
-        # Compute csv data for beeswarm summary
+        # Compute csv data for Beeswarm summary
         shap_df = pd.DataFrame(shap_values_attack_class, columns=X_scaled_df.columns)
         shap_df["index"] = shap_df.index
         shap_df = shap_df.melt(
@@ -549,7 +549,7 @@ async def get_attack_detection_xai_summary(
 
         return {
             "bar_summary": bar_summary_df.to_dict(orient="records"),
-            "beeswarm_summary": {}# beeswarm_summary_df.to_dict(orient="records"),
+            "beeswarm_summary": beeswarm_summary_df.to_dict(orient="records"),
         }
 
     except Exception as e:
@@ -558,3 +558,114 @@ async def get_attack_detection_xai_summary(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Failed to retrieve or process data.",
         )
+
+
+@router.get("/summary/bar/explanation")
+async def get_attack_detection_xai_summary_bar_explanation(
+    attack_type: str,
+    session_id: Optional[str] = Cookie(None),
+    s3_service: S3 = Depends(S3),
+    gemini_service: GeminiService = Depends(GeminiService),
+):
+    """
+    Retrieve or generate an explanation for the SHAP summary bar CSV for a given attack_type.
+    This explanation is generated using the Gemini API based on the bar summary data.
+
+    Steps:
+      1. Validate the session.
+      2. Check if the bar-summary CSV file exists in S3.
+      3. If a Gemini explanation file already exists, return its content.
+      4. Otherwise, read the CSV data from S3, generate the explanation using the Gemini service,
+         upload the explanation to S3, and return it.
+    """
+    # Validate session_id
+    if not session_id:
+        raise HTTPException(status_code=400, detail="Session ID missing")
+
+    print("session_id", session_id)
+
+    base_key = f"xai/{attack_type}/summary"
+    bar_summary_key = f"{base_key}/bar_summary/value.csv"
+    gemini_explanation_key = f"{base_key}/bar_summary/explanation.text"
+
+    # Check if the bar-summary CSV exists in S3
+    try:
+        csv_exists = await s3_service.file_exists(
+            filename=bar_summary_key, session_id=session_id
+        )
+    except Exception as exc:
+        print("Error checking S3 for bar-summary CSV file:", exc)
+        raise HTTPException(
+            status_code=500, detail="Error checking S3 for bar-summary CSV file"
+        )
+
+    print("csv_exists", csv_exists)
+    if not csv_exists:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Bar-summary CSV not found for attack type '{attack_type}'.",
+        )
+
+    # Check if the Gemini explanation already exists in S3
+    try:
+        explanation_exists = await s3_service.file_exists(
+            filename=gemini_explanation_key, session_id=session_id
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500, detail="Error checking S3 for explanation file"
+        )
+
+    if explanation_exists:
+        try:
+            explanation_data = await s3_service.read(
+                f"uploads/{session_id}/{gemini_explanation_key}"
+            )
+            explanation_text = explanation_data.decode("utf-8")
+            return {"explanation": explanation_text}
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500, detail="Error reading explanation file from S3"
+            )
+
+    # Read the bar-summary CSV file from S3
+    try:
+        print("Reading bar-summary CSV file from S3")
+        bar_summary_data = await s3_service.read(
+            f"uploads/{session_id}/{bar_summary_key}"
+        )
+        bar_summary_csv = bar_summary_data.decode("utf-8")
+        print("bar_summary_csv\n", bar_summary_csv)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500, detail="Error reading bar-summary CSV file from S3"
+        )
+
+    # Generate the explanation using Gemini
+    try:
+        explanation = gemini_service.generate_shap_summary_bar_explanation(
+            input_shap_summary_bar_data=bar_summary_csv,
+            attackType=attack_type,
+        )
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500, detail="Error generating explanation from Gemini API"
+        )
+
+    # Upload the generated explanation to S3 for future reuse
+    try:
+        upload_explanation_file = UploadFile(
+            filename="explanation.text",
+            file=io.BytesIO(explanation.encode("utf-8")),
+        )
+        await s3_service.upload(
+            file=upload_explanation_file,
+            file_path=gemini_explanation_key,
+            session_id=session_id,
+        )
+    except Exception as exc:
+        # Log the exception, but do not block the response if saving fails.
+        print("Warning: Failed to save explanation file to S3:", exc)
+
+    return {"explanation": explanation}
