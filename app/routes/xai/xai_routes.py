@@ -309,7 +309,7 @@ async def get_attack_detection_xai_explanation(
 
     # Generate the explanation using Gemini
     try:
-        explanation = gemini_service.generate_shap_force_plot_explanation(shap_text)
+        explanation = gemini_service.generate_shap_force_plot_explanation(shap_text, attack_type)
     except Exception as exc:
         # Optionally log the exception: logger.error(f"Gemini API error: {exc}")
         raise HTTPException(
@@ -678,5 +678,141 @@ async def get_attack_detection_xai_summary_bar_explanation(
     except Exception as exc:
         # Log the exception, but do not block the response if saving fails.
         print("Warning: Failed to save explanation file to S3:", exc)
+
+    return {"explanation": explanation}
+
+
+@router.get("/summary/beeswarm/explanation")
+async def get_attack_detection_xai_summary_beeswarm_explanation(
+    attack_type: str,
+    session_id: Optional[str] = Cookie(None),
+    s3_service: S3 = Depends(S3),
+    gemini_service: GeminiService = Depends(GeminiService),
+):
+    """
+    Retrieve or generate an explanation for the SHAP beeswarm summary CSV for a given attack_type.
+    This explanation is generated using the Gemini API based on the beeswarm summary data.
+
+    Steps:
+      1. Validate the session ID.
+      2. Check if the beeswarm-summary CSV file exists in S3.
+      3. If a Gemini explanation file already exists, return its content.
+      4. Otherwise, read the CSV data from S3, filter it to include only the top 2 objects
+         per unique feature (based on the largest absolute SHAP value), generate the explanation
+         using the Gemini service, upload the explanation to S3, and return it.
+    """
+    # Validate session_id
+    if not session_id:
+        raise HTTPException(status_code=400, detail="Session ID missing")
+
+    # Define S3 file keys
+    base_key = f"xai/{attack_type}/summary"
+    beeswarm_summary_key = f"{base_key}/beeswarm_summary/value.csv"
+    gemini_explanation_key = f"{base_key}/beeswarm_summary/explanation.text"
+
+    # Check if the beeswarm-summary CSV exists in S3
+    try:
+        csv_exists = await s3_service.file_exists(
+            filename=beeswarm_summary_key, session_id=session_id
+        )
+    except Exception as exc:
+        print("Error checking S3 for beeswarm-summary CSV file:", exc)
+        raise HTTPException(
+            status_code=500, detail="Error checking S3 for beeswarm-summary CSV file"
+        )
+
+    if not csv_exists:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Beeswarm-summary CSV not found for attack type '{attack_type}'.",
+        )
+
+    # Check if the Gemini explanation already exists in S3
+    try:
+        explanation_exists = await s3_service.file_exists(
+            filename=gemini_explanation_key, session_id=session_id
+        )
+    except Exception as exc:
+        print("Error checking S3 for existing explanation file:", exc)
+        raise HTTPException(
+            status_code=500, detail="Error checking S3 for existing explanation file"
+        )
+
+    # if explanation_exists:
+    #     try:
+    #         explanation_data = await s3_service.read(
+    #             f"uploads/{session_id}/{gemini_explanation_key}"
+    #         )
+    #         explanation_text = explanation_data.decode("utf-8")
+    #         return {"explanation": explanation_text}
+    #     except Exception as exc:
+    #         print("Error reading existing explanation file from S3:", exc)
+    #         raise HTTPException(
+    #             status_code=500,
+    #             detail="Error reading existing explanation file from S3",
+    #         )
+
+    # Read the full beeswarm-summary CSV from S3
+    try:
+        beeswarm_summary_data = await s3_service.read(
+            f"uploads/{session_id}/{beeswarm_summary_key}"
+        )
+        beeswarm_summary_csv = beeswarm_summary_data.decode("utf-8")
+    except Exception as exc:
+        print("Error reading beeswarm-summary CSV file from S3:", exc)
+        raise HTTPException(
+            status_code=500, detail="Error reading beeswarm-summary CSV file from S3"
+        )
+
+    # Filter the CSV: select only the top 2 rows per unique feature based on largest |shap_value|
+    try:
+        # Use pandas to parse and filter the data
+        from io import StringIO
+        import pandas as pd
+
+        df = pd.read_csv(StringIO(beeswarm_summary_csv))
+        # Group by "feature" and take the top 2 rows sorted by absolute shap_value
+        filtered_df = df.groupby("feature", group_keys=False).apply(
+            lambda x: x.reindex(
+                x["shap_value"].abs().sort_values(ascending=False).index
+            ).head(2)
+        )
+
+        # Select only the columns needed for the explanation
+        filtered_df = filtered_df[["feature", "original_feature_value", "shap_value"]]
+        print("filtered_df\n", filtered_df)
+    except Exception as exc:
+        print("Error filtering beeswarm-summary CSV data:", exc)
+        raise HTTPException(
+            status_code=500, detail="Error processing beeswarm-summary CSV data"
+        )
+
+    # Generate the explanation using Gemini with the filtered CSV data
+    try:
+        print("Generating explanation from Gemini API")
+        explanation = gemini_service.generate_shap_summary_beeswarm_explanation(
+            input_shap_summary_beeswarm_data=filtered_df.to_string(index=False),
+            attackType=attack_type,
+        )
+    except Exception as exc:
+        print("Error generating explanation from Gemini API:", exc)
+        raise HTTPException(
+            status_code=500, detail="Error generating explanation from Gemini API"
+        )
+
+    # Upload the generated explanation to S3 for future reuse
+    try:
+        explanation_bytes = explanation.encode("utf-8")
+        upload_explanation_file = UploadFile(
+            filename="explanation.text", file=io.BytesIO(explanation_bytes)
+        )
+        await s3_service.upload(
+            file=upload_explanation_file,
+            file_path=gemini_explanation_key,
+            session_id=session_id,
+        )
+    except Exception as exc:
+        print("Warning: Failed to save beeswarm explanation file to S3:", exc)
+        # Do not block returning the explanation if saving fails
 
     return {"explanation": explanation}

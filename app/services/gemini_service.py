@@ -32,20 +32,12 @@ class GeminiService:
             )
 
     def generate_shap_force_plot_explanation(
-        self, input_shap_force_plot_data: str, max_tokens: int = 1000
+        self, input_shap_force_plot_data: str, attackType: str, max_tokens: int = 1000
     ) -> str:
-        """
-        Generate a text explanation for the provided SHAP force plot data using Gemini 2.0 Flash.
-        This method uses a predefined few-shot prompt template to guide the explanation generation.
-
-        :param input_shap_force_plot_data: The SHAP force plot data to be explained.
-        :param max_tokens: Maximum number of tokens for the output text (default: 1000).
-        :return: The generated explanation text.
-        :raises HTTPException: If the Gemini API call fails.
-        """
+        print("input_shap_force_plot_data", input_shap_force_plot_data)
         few_shot_prompt = f"""
 **System/Instruction:**  
-You are an AI assistant with expertise in explaining machine learning model predictions. You will be given SHAP force plot data for a single prediction made by a model that classifies an instance into potential network attacks (e.g., FTP-Patator, DDoS, PortScan). Your task is to provide a concise, beginner-friendly explanation in **one paragraph**. In your explanation:
+You are an AI assistant with expertise in explaining machine learning model predictions. You will be given SHAP force plot data for a single prediction made by a model that classifies an instance into potential network attack class (e.g., FTP-Patator, DDoS, PortScan). Your task is to provide a concise, beginner-friendly explanation in **one paragraph**. In your explanation:
 1. Briefly explain what the classified attack is (its name and typical characteristics).  
 2. Describe what a SHAP force plot is, including the significance of the base (expected) value.  
 3. Explain how each feature’s value and its SHAP value pull the prediction from the base value toward or away from the final classification.  
@@ -55,7 +47,7 @@ Follow the style and detail shown in **Example 1** below. Then apply it to the *
 ---
 
 **Example 1**  
-**Input (SHAP Force Plot Data):**  
+**Input for single prediction into FTP-Patator attack class (SHAP Force Plot Data):**  
 ```
 Base (Expected) Value: -5.350231170654297
 
@@ -79,7 +71,7 @@ FTP-Patator is a brute force attack targeting FTP servers where attackers repeat
 
 ---
 
-**New Input (SHAP Force Plot Data):**  
+**New Input for single prediction into {attackType} attack class (SHAP Force Plot Data):**  
 ```
 {input_shap_force_plot_data}
 ```
@@ -101,19 +93,6 @@ Provide a single-paragraph explanation in the same style as **Example 1**, using
     def generate_shap_summary_bar_explanation(
         self, input_shap_summary_bar_data: str, attackType: str, max_tokens: int = 1000
     ) -> str:
-        """
-        Generate a plain-language explanation for class-specific SHAP summary bar data using Gemini 2.0 Flash.
-        The SHAP summary bar plot shows, for a specific attack class, the average impact (mean absolute SHAP value)
-        of each feature on the model’s decision. This function uses the provided data for an attack class (e.g., FTP-Patator)
-        and generates a beginner-friendly explanation that describes what the plot indicates and why the top features are important.
-
-        :param input_shap_summary_bar_data: A CSV-formatted string with columns 'feature' and 'mean_abs_shap'
-                                            representing the average impact of each feature.
-        :param attackType: The name of the attack class (e.g., "FTP-Patator").
-        :param max_tokens: Maximum number of tokens for the output text (default: 1000).
-        :return: A single-paragraph explanation in beginner-friendly language.
-        :raises HTTPException: If the Gemini API call fails.
-        """
         few_shot_prompt = f"""
 **System/Instruction:**
 You are an expert in explaining machine learning model predictions, especially using SHAP (SHapley Additive exPlanations) values. Your goal is to produce a single, clear paragraph that a beginner can understand. In your explanation, please:
@@ -168,4 +147,77 @@ Provide a single-paragraph explanation that follows the guidelines above and is 
             return response.text
         except Exception as e:
             print(f"Error generating SHAP summary bar explanation: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Gemini API error: {str(e)}")
+
+    def generate_shap_summary_beeswarm_explanation(
+        self,
+        input_shap_summary_beeswarm_data: str,
+        attackType: str,
+        max_tokens: int = 1000,
+    ) -> str:
+        few_shot_prompt = f"""
+**System/Instruction:**
+A beeswarm plot shows an information-dense summary of how the top features impact a model’s output for a specific attack class.
+Each dot in the plot represents an instance’s contribution for a feature. The x-axis displays the SHAP value, which
+quantifies how strongly that feature pushes the model’s prediction toward or away from the {attackType} class.
+Additionally, dots are colored on a red-to-blue scale: red indicates high feature values and blue indicates low feature values.
+
+For this task, you will be given filtered beeswarm summary data that includes only the top two rows per feature,
+selected based on the largest absolute SHAP values. Use this information to explain how to interpret the plot for the {attackType} attack.
+
+---
+
+**Example 1**
+**Input (FTP-Patator Attack Class Beeswarm Summary Data):**
+```
+       feature            original_feature_value   shap_value
+Bwd IAT Mean           0.000000                   -1.006682
+Bwd IAT Mean           0.000000                   -1.006682
+Bwd Init Win Bytes     390.000000                  0.000000
+Bwd Init Win Bytes     0.000000                    0.000000
+Bwd Packet Length Std  13.596218                  -0.454519
+Bwd Packet Length Std  0.000000                   -0.145034
+Dst Port               21.000000                   10.356689
+Dst Port               21.000000                   10.356689
+Fwd PSH Flags          6.000000                    0.000000
+Fwd PSH Flags          0.000000                    0.000000
+Fwd Packet Length Max  16.000000                   0.009103
+Fwd Packet Length Max  14.000000                   0.009103
+Src Port               0.000000                   -1.286326
+Src Port               0.000000                   -1.286326
+Total Length of Fwd Packet 0.000000                -0.180848
+Total Length of Fwd Packet 0.000000                -0.180848
+Total TCP Flow Time    0.000000                   -0.960099
+Total TCP Flow Time    0.000000                   -0.960099
+```
+
+**Output (Single Paragraph Explanation):**
+```
+In this SHAP beeswarm plot for FTP-Patator, each dot represents an instance’s contribution of a feature toward the prediction.
+The x-axis shows the SHAP value, with positive values indicating features that drive the model toward classifying traffic as FTP-Patator,
+and negative values suggesting the opposite. For example, "Dst Port" has a very high positive SHAP value (around 10.36), meaning that a common
+destination port value of 21 strongly supports an FTP-Patator classification. Meanwhile, features like "Bwd IAT Mean" and "Src Port" show negative SHAP values,
+implying that their lower or absent values reduce this likelihood. The plot’s red-to-blue color scale further reveals that higher feature values (red)
+and lower feature values (blue) play a critical role in how these contributions are interpreted.
+```
+
+---
+
+**New Input ({attackType} Attack Class Beeswarm Summary Data):**
+```
+{input_shap_summary_beeswarm_data}
+```
+
+**Your Task:**
+Provide a single-paragraph explanation in the same style as **Example 1**, using the **New Input** data (for attack type: {attackType}).
+"""
+        try:
+            response = self.client.models.generate_content(
+                model=settings.GEMINI_MODEL,  # e.g., "gemini-2.0-flash"
+                contents=[few_shot_prompt],
+                config=types.GenerateContentConfig(max_output_tokens=max_tokens),
+            )
+            return response.text
+        except Exception as e:
+            print(f"Error generating SHAP beeswarm explanation: {str(e)}")
             raise HTTPException(status_code=500, detail=f"Gemini API error: {str(e)}")
