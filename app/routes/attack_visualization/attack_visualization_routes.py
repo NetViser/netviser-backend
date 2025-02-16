@@ -32,7 +32,7 @@ async def get_time_series_attack_data(
         "values": [...],
         "attackMarkPoint": [[ts, val], [ts, val], ...],
         "otherAttackMarkPoint": [[ts, val], ...],
-        "feature": "Flow Bytes/s"
+        "feature": "<dynamic feature column>"
       },
       "highlight": [
         [
@@ -66,18 +66,34 @@ async def get_time_series_attack_data(
         print("Original data shape:", df.shape)
 
         # -----------------------------------------------------------------------
-        # 2. Basic Parsing & Cleanup
+        # 2. Decide which feature column to chart, based on attack_type
         # -----------------------------------------------------------------------
-        # Timestamp to datetime (assuming ms)
+        # e.g. you can map DDoS -> 'Bwd Packet Length Mean', FTP-Patator -> 'Total Length of Fwd Packet'
+        attackTypeFeatureMap = {
+            "DDoS": "Bwd Packet Length Mean",
+            "FTP-Patator": "Total Length of Fwd Packet",
+        }
+        feature_name = attackTypeFeatureMap.get(attack_type, "Flow Bytes/s")
+
+        # Parse Timestamp as datetime (assuming ms)
         df["Timestamp"] = pd.to_datetime(df["Timestamp"], unit="ms", errors="coerce")
         df.dropna(subset=["Timestamp"], inplace=True)
 
-        # Convert "Flow Bytes/s" to numeric, drop rows where it's invalid
-        df["Flow Bytes/s"] = pd.to_numeric(df["Flow Bytes/s"], errors="coerce")
-        df.dropna(subset=["Flow Bytes/s"], inplace=True)
+        # -----------------------------------------------------------------------
+        # 3. Convert the chosen feature column to numeric, drop invalid
+        # -----------------------------------------------------------------------
+        if feature_name not in df.columns:
+            # If the feature doesn't exist in this dataset, fallback or raise error
+            raise HTTPException(
+                status_code=400,
+                detail=f"Feature '{feature_name}' not found in CSV columns."
+            )
+
+        df[feature_name] = pd.to_numeric(df[feature_name], errors="coerce")
+        df.dropna(subset=[feature_name], inplace=True)
 
         # -----------------------------------------------------------------------
-        # 3. Create numeric columns: is_attack_type / is_other_attack
+        # 4. Identify "is_attack_type" vs "is_other_attack"
         # -----------------------------------------------------------------------
         df["is_attack_type"] = np.where(df["Label"] == attack_type, 1, 0)
         df["is_other_attack"] = np.where(
@@ -87,21 +103,20 @@ async def get_time_series_attack_data(
         )
 
         # -----------------------------------------------------------------------
-        # 4. Resample by 1-second
+        # 5. Resample by 1-second bins
         # -----------------------------------------------------------------------
         df.set_index("Timestamp", inplace=True)
-
         grouped = df.resample("1s").agg(
-            FlowBytesMean=("Flow Bytes/s", "mean"),
+            FeatureMean=(feature_name, "mean"),
             AttackTypeCount=("is_attack_type", "sum"),
             OtherAttackCount=("is_other_attack", "sum"),
-            RowCount=("Flow Bytes/s", "count"),
+            RowCount=(feature_name, "count"),
         )
 
         # Keep only bins with >= 1 row
         grouped = grouped[grouped["RowCount"] > 0]
 
-        # Decide "match"/"other"/"none"
+        # Decide "match"/"other"/"none" for each bin
         def label_bin(row):
             if row["AttackTypeCount"] > 0:
                 return "match"
@@ -116,38 +131,31 @@ async def get_time_series_attack_data(
         grouped.sort_values("Timestamp", inplace=True)
 
         # -----------------------------------------------------------------------
-        # 5. Build arrays for timestamps, values, plus MarkPoints
+        # 6. Build arrays for timestamps, values, plus MarkPoints
         # -----------------------------------------------------------------------
         timestamps = []
         values = []
-        attackMarkPoint = []        # for "match" bins
-        otherAttackMarkPoint = []   # for "other" bins
+        attackMarkPoint = []
+        otherAttackMarkPoint = []
 
         for _, row in grouped.iterrows():
             ts = row["Timestamp"]
-            val = row["FlowBytesMean"] if not pd.isna(row["FlowBytesMean"]) else 0.0
+            val = row["FeatureMean"] if not pd.isna(row["FeatureMean"]) else 0.0
 
-            # Store overall arrays
+            # Store main arrays
             timestamps.append(ts.isoformat())
             values.append(float(val))
 
-            # If row labeled match => store in attackMarkPoint
             if row["attack"] == "match":
-                attackMarkPoint.append([
-                    ts.isoformat(),
-                    float(val)
-                ])
-            # If row labeled other => store in otherAttackMarkPoint
+                attackMarkPoint.append([ts.isoformat(), float(val)])
             elif row["attack"] == "other":
-                otherAttackMarkPoint.append([
-                    ts.isoformat(),
-                    float(val)
-                ])
+                otherAttackMarkPoint.append([ts.isoformat(), float(val)])
 
         # -----------------------------------------------------------------------
-        # 6. Build highlight intervals
+        # 7. Build highlight intervals
         # -----------------------------------------------------------------------
-        # We'll define an 'attack_name' => user-specified for "match", "otherAttack" for "other"
+        # We'll define 'attack_name' => user-specified for "match",
+        # "otherAttack" for "other", else None
         grouped["attack_name"] = grouped["attack"].apply(
             lambda x: attack_type if x == "match" else ("otherAttack" if x == "other" else None)
         )
@@ -157,14 +165,14 @@ async def get_time_series_attack_data(
         start_ts = None
         prev_ts = None
 
-        for i, row in grouped.iterrows():
+        for _, row in grouped.iterrows():
             row_attack = row["attack_name"]
             ts = row["Timestamp"]
 
             if row_attack is None:
                 # If we currently have an open run, close it
                 if current_attack is not None and start_ts is not None:
-                    end_ts = prev_ts if prev_ts is not None else ts
+                    end_ts = prev_ts if prev_ts else ts
                     highlight.append([
                         {"name": current_attack, "xAxis": start_ts.isoformat()},
                         {"xAxis": end_ts.isoformat()}
@@ -178,9 +186,9 @@ async def get_time_series_attack_data(
                     current_attack = row_attack
                     start_ts = ts
                 elif row_attack != current_attack:
-                    # Attack type changed => close old run
+                    # Attack changed => close old run
                     if start_ts is not None:
-                        end_ts = prev_ts if prev_ts is not None else ts
+                        end_ts = prev_ts if prev_ts else ts
                         highlight.append([
                             {"name": current_attack, "xAxis": start_ts.isoformat()},
                             {"xAxis": end_ts.isoformat()}
@@ -198,7 +206,7 @@ async def get_time_series_attack_data(
             ])
 
         # -----------------------------------------------------------------------
-        # 7. Build final response object
+        # 8. Build final response object
         # -----------------------------------------------------------------------
         response_json = {
             "data": {
@@ -206,9 +214,9 @@ async def get_time_series_attack_data(
                 "values": values,
                 "attackMarkPoint": attackMarkPoint,
                 "otherAttackMarkPoint": otherAttackMarkPoint,
-                "feature": "Flow Bytes/s",
+                "feature": feature_name,  # <--- use dynamic feature here
             },
-            "highlight": highlight
+            "highlight": highlight,
         }
 
         return response_json
