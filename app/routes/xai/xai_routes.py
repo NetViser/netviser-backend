@@ -309,7 +309,9 @@ async def get_attack_detection_xai_explanation(
 
     # Generate the explanation using Gemini
     try:
-        explanation = gemini_service.generate_shap_force_plot_explanation(shap_text, attack_type)
+        explanation = gemini_service.generate_shap_force_plot_explanation(
+            shap_text, attack_type
+        )
     except Exception as exc:
         # Optionally log the exception: logger.error(f"Gemini API error: {exc}")
         raise HTTPException(
