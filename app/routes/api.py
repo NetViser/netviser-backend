@@ -4,7 +4,6 @@ import io
 import uuid
 
 import numpy as np
-from app.services.gemini_service import GeminiService
 from app.services.redis_service import RedisClient
 from fastapi import (
     APIRouter,
@@ -22,7 +21,6 @@ import xgboost as xgb
 import pandas as pd
 import os
 import joblib
-import shap
 from app.services.s3_service import S3
 from app.services.input_handle_service import preprocess
 
@@ -215,6 +213,7 @@ async def get_specific_attack_detection(
                 "dstPort": row["Dst Port"],
                 "portPairCount": row["Port Pair Count"],
                 "srcIpPortPairCount": row["Src IP Port Pair Count"],
+                "packetlengthmean": row["Packet Length Mean"],
             }
             for row in normal_df.dropna().to_dict(orient="records")
         ]
@@ -236,6 +235,7 @@ async def get_specific_attack_detection(
                 "dstPort": row["Dst Port"],
                 "portPairCount": row["Port Pair Count"],
                 "srcIpPortPairCount": row["Src IP Port Pair Count"],
+                "packetlengthmean": row["Packet Length Mean"],
             }
             for row in attack_df.dropna().to_dict(orient="records")
         ]
