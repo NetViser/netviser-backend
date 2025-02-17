@@ -140,16 +140,20 @@ async def get_time_series_attack_data(
 
         for _, row in grouped.iterrows():
             ts = row["Timestamp"]
+            # Get the feature value (or 0.0 if missing)
             val = row["FeatureMean"] if not pd.isna(row["FeatureMean"]) else 0.0
 
-            # Store main arrays
+            # Round the value to 3 decimal points.
+            rounded_val = round(float(val), 3)
+
+            # Append the timestamp and rounded value.
             timestamps.append(ts.isoformat())
-            values.append(float(val))
+            values.append(rounded_val)
 
             if row["attack"] == "match":
-                attackMarkPoint.append([ts.isoformat(), float(val)])
+                attackMarkPoint.append([ts.isoformat(), rounded_val])
             elif row["attack"] == "other":
-                otherAttackMarkPoint.append([ts.isoformat(), float(val)])
+                otherAttackMarkPoint.append([ts.isoformat(), rounded_val])
 
         # -----------------------------------------------------------------------
         # 7. Build highlight intervals
