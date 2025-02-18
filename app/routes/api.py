@@ -196,6 +196,11 @@ async def get_specific_attack_detection(
         attack_df = data_frame[data_frame["Label"] == attack_type]
         attack_df = attack_df.sort_values(by="Timestamp", ascending=False)
 
+        protocol_distribution_normal = Counter(normal_df["Protocol"])
+        protocol_distribution_attack = Counter(attack_df["Protocol"])
+
+        print(protocol_distribution_attack)
+
         # Prepare normal data in camelCase
         normal_data = [
             {
@@ -205,6 +210,7 @@ async def get_specific_attack_detection(
                 "flowPacketsPerSecond": row["Flow Packets/s"],
                 "averagePacketSize": row["Average Packet Size"],
                 "totalFwdPacket": row["Total Fwd Packet"],
+                "totalBwdPacket": row["Total Bwd packets"],
                 "totalLengthOfFwdPacket": row["Total Length of Fwd Packet"],
                 "protocol": row["Protocol"],
                 "srcIp": row["Src IP"],
@@ -214,6 +220,10 @@ async def get_specific_attack_detection(
                 "portPairCount": row["Port Pair Count"],
                 "srcIpPortPairCount": row["Src IP Port Pair Count"],
                 "packetlengthmean": row["Packet Length Mean"],
+                "synflagcount": row["SYN Flag Count"],
+                "ackflagcount": row["ACK Flag Count"],
+                "subflowfwdbytes": row["Subflow Fwd Bytes"],
+                "protocol_distribution": dict(protocol_distribution_normal),
             }
             for row in normal_df.dropna().to_dict(orient="records")
         ]
@@ -227,6 +237,7 @@ async def get_specific_attack_detection(
                 "flowPacketsPerSecond": row["Flow Packets/s"],
                 "averagePacketSize": row["Average Packet Size"],
                 "totalFwdPacket": row["Total Fwd Packet"],
+                "totalBwdPacket": row["Total Bwd packets"],
                 "totalLengthOfFwdPacket": row["Total Length of Fwd Packet"],
                 "protocol": row["Protocol"],
                 "srcIp": row["Src IP"],
@@ -236,6 +247,10 @@ async def get_specific_attack_detection(
                 "portPairCount": row["Port Pair Count"],
                 "srcIpPortPairCount": row["Src IP Port Pair Count"],
                 "packetlengthmean": row["Packet Length Mean"],
+                "synflagcount": row["SYN Flag Count"],
+                "ackflagcount": row["ACK Flag Count"],
+                "subflowfwdbytes": row["Subflow Fwd Bytes"],
+                "protocol_distribution": dict(protocol_distribution_attack),
             }
             for row in attack_df.dropna().to_dict(orient="records")
         ]
