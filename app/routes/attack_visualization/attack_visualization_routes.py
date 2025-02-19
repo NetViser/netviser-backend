@@ -131,19 +131,29 @@ async def get_time_series_attack_data(
 
         current_start_idx = 0
         prev_timestamp = grouped.loc[0, "Timestamp"]
+        print("grouped shape:", grouped.shape)
+        print("grouped columns:", grouped.columns)
 
         for i in range(1, len(grouped)):
             current_timestamp = grouped.loc[i, "Timestamp"]
             if current_timestamp - prev_timestamp > timedelta(hours=1):
                 start_ts = grouped.loc[current_start_idx, "Timestamp"]
                 end_ts = grouped.loc[i - 1, "Timestamp"]
-                partitions_info.append((current_start_idx, i - 1, start_ts, end_ts))
+                # Add partition only if it contains the attack type
+                partition_data = grouped.iloc[current_start_idx:i]
+                if partition_data['AttackTypeCount'].sum() > 0:  # Check if the partition contains the attack type
+                    partitions_info.append((current_start_idx, i - 1, start_ts, end_ts))
+                else:
+                    print("Skipping partition:", start_ts, end_ts)
                 current_start_idx = i
             prev_timestamp = current_timestamp
 
+        # Add the last partition
         start_ts = grouped.loc[current_start_idx, "Timestamp"]
         end_ts = grouped.loc[len(grouped) - 1, "Timestamp"]
-        partitions_info.append((current_start_idx, len(grouped) - 1, start_ts, end_ts))
+        partition_data = grouped.iloc[current_start_idx:len(grouped)]
+        if partition_data["AttackTypeCount"].sum() > 0:  # Check if the partition contains the attack type
+            partitions_info.append((current_start_idx, len(grouped) - 1, start_ts, end_ts))
 
         partitions_boundary = [
             {"start": st.isoformat(), "end": et.isoformat()}
@@ -241,6 +251,7 @@ async def get_time_series_attack_data(
             },
             "highlight": highlight,
             "partitions": partitions_boundary,
+            "current_partition_index": partition_index  # Add current partition index
         }
 
         return response_json

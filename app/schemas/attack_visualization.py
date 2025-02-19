@@ -58,3 +58,4 @@ class GetTimeSeriesAttackDataResponse(BaseModel):
     data: DataSchema
     highlight: List[List[HighlightItem]]
     partitions: List[PartitionBoundary] = []
+    current_partition_index: Optional[int] = None
