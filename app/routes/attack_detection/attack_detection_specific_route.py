@@ -15,38 +15,43 @@ router = APIRouter(prefix="/api/attack-detection/specific", tags=["specific atta
 settings = get_settings()
 redis_client = RedisClient()
 
+sankey_fields = [
+    "srcPort",
+    "dstPort",
+    "srcIp",
+    "srcIpPortPairCount",
+    "portPairCount",
+]
+
 # Define field mapping for specific attack types (camelCase keys)
 attack_field_mapping = {
     "FTP-Patator": [
         "flowBytesPerSecond",
-        "srcPort",
-        "dstPort",
-        "srcIp",
-        "srcIpPortPairCount",
-        "portPairCount",
         "totalTCPFlowTime",
         "bwdIATMean",
+        *sankey_fields,
     ],
     "DDoS": [
-        "srcIp",
-        "packetlengthmean",
-        "srcPort",
         "dstIp",
-        "srcIpPortPairCount",
-        "portPairCount",
+        *sankey_fields,
+        "packetlengthmean",
         "flowDuration",
         "flowPacketsPerSecond",
         "bwdpacketlengthstd",
         "protocol",
     ],
     "Portscan": [
-        "srcPort",
-        "dstPort",
+        *sankey_fields,
         "dstIp",
-        "srcIp",
-        "srcIpPortPairCount",
-        "portPairCount",
         "totalLengthOfFwdPacket",
+    ],
+    "DoS Hulk": [
+        "bwdpacketlengthstd",
+        "bwdInitWinBytes",
+        "fwdPacketLengthMax",
+        "bwdIATMean",
+        "dstIp",
+        *sankey_fields,
     ],
 }
 
@@ -63,6 +68,8 @@ all_fields = [
     "totalTCPFlowTime",
     "bwdpacketlengthstd",
     "bwdIATMean",
+    "bwdInitWinBytes",
+    "fwdPacketLengthMax",
     "protocol",
     "srcIp",
     "dstIp",
@@ -94,6 +101,8 @@ def build_record(row: dict, field_list: list, protocol_distribution: dict) -> di
         "totalTCPFlowTime": lambda r: r["Total TCP Flow Time"],
         "bwdpacketlengthstd": lambda r: r["Bwd Packet Length Std"],
         "bwdIATMean": lambda r: r["Bwd IAT Mean"],
+        "bwdInitWinBytes": lambda r: r["Bwd Init Win Bytes"],
+        "fwdPacketLengthMax": lambda r: r["Fwd Packet Length Max"],
         "protocol": lambda r: r["Protocol"],
         "srcIp": lambda r: r["Src IP"],
         "dstIp": lambda r: r["Dst IP"],
