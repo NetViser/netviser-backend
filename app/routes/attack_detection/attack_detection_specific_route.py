@@ -53,6 +53,12 @@ attack_field_mapping = {
         "dstIp",
         *sankey_fields,
     ],
+    "DoS Slowloris": [
+        "totalTCPFlowTime",
+        "bwdIATMean",
+        *sankey_fields,
+        "fwdPSHFlags",
+    ],
 }
 
 # Full list of fields if the attack type is not one of the above
@@ -70,6 +76,7 @@ all_fields = [
     "bwdIATMean",
     "bwdInitWinBytes",
     "fwdPacketLengthMax",
+    "fwdPSHFlags",
     "protocol",
     "srcIp",
     "dstIp",
@@ -103,6 +110,7 @@ def build_record(row: dict, field_list: list, protocol_distribution: dict) -> di
         "bwdIATMean": lambda r: r["Bwd IAT Mean"],
         "bwdInitWinBytes": lambda r: r["Bwd Init Win Bytes"],
         "fwdPacketLengthMax": lambda r: r["Fwd Packet Length Max"],
+        "fwdPSHFlags": lambda r: r["Fwd PSH Flags"],
         "protocol": lambda r: r["Protocol"],
         "srcIp": lambda r: r["Src IP"],
         "dstIp": lambda r: r["Dst IP"],
