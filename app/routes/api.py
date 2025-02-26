@@ -219,17 +219,16 @@ async def upload_file(
     if not file:
         raise ValueError("File missing")
 
-    # 2. Create a new session if necessary
-    if not session_id:
-        session_id = str(uuid.uuid4())
-        response.set_cookie(
-            key=SESSION_COOKIE_NAME,
-            value=session_id,
-            max_age=43200,  # 12 hours
-            httponly=True,
-            secure=(False if settings.STAGE == "local" else True),
-            samesite="lax",
-        )
+    # 2. Create a new session
+    session_id = str(uuid.uuid4())
+    response.set_cookie(
+        key=SESSION_COOKIE_NAME,
+        value=session_id,
+        max_age=43200,  # 12 hours
+        httponly=True,
+        secure=(False if settings.STAGE == "local" else True),
+        samesite="lax",
+    )
 
     try:
         # 3. Read CSV into a DataFrame using pyarrow for speed/efficiency
