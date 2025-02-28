@@ -11,7 +11,9 @@ from app.services.s3_service import S3
 from app.services.redis_service import RedisClient
 from app.configs.config import get_settings
 
-router = APIRouter(prefix="/api/attack-detection/specific", tags=["specific attack detection"])
+router = APIRouter(
+    prefix="/api/attack-detection/specific", tags=["specific attack detection"]
+)
 settings = get_settings()
 redis_client = RedisClient()
 
@@ -91,6 +93,7 @@ all_fields = [
     "protocol_distribution",
 ]
 
+
 def build_record(row: dict, field_list: list, protocol_distribution: dict) -> dict:
     """
     Convert a DataFrame row (as a dict) to a new dict with camelCase keys.
@@ -125,6 +128,7 @@ def build_record(row: dict, field_list: list, protocol_distribution: dict) -> di
         "protocol_distribution": lambda r: protocol_distribution,
     }
     return {key: mapping[key](row) for key in field_list if key in mapping}
+
 
 @router.get("/")
 async def get_specific_attack_detection(
