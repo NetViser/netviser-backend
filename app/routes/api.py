@@ -4,6 +4,7 @@ import io
 import uuid
 
 import numpy as np
+from app.services.lambda_service import LambdaService
 from app.services.redis_service import RedisClient
 from fastapi import (
     APIRouter,
@@ -73,7 +74,7 @@ async def get_dashboard(
 
         # Resample Flow Bytes/s
         flow_bytes_resampled = (
-            data_frame["flow_bytes/s"].resample("1S").mean().reset_index()
+            data_frame["flow_bytes/s"].resample("1s").mean().reset_index()
         )
         flow_bytes_resampled.columns = ["timestamp", "value"]
 
@@ -82,7 +83,7 @@ async def get_dashboard(
 
         # Resample Forward Packets/s
         fwd_packets_resampled = (
-            data_frame["fwd_packets/s"].resample("1S").mean().reset_index()
+            data_frame["fwd_packets/s"].resample("1s").mean().reset_index()
         )
         fwd_packets_resampled.columns = ["timestamp", "value"]
 
@@ -91,7 +92,7 @@ async def get_dashboard(
 
         # Resample Backward Packets/s
         bwd_packets_resampled = (
-            data_frame["bwd_packets/s"].resample("1S").mean().reset_index()
+            data_frame["bwd_packets/s"].resample("1s").mean().reset_index()
         )
         bwd_packets_resampled.columns = ["timestamp", "value"]
 
@@ -128,7 +129,6 @@ async def get_dashboard(
     except Exception as e:
         print(e)
         return Response(status_code=400, content="Failed to retrieve dashboard.")
-
 
 
 @router.get("/attack-detection/records")
@@ -205,6 +205,7 @@ async def upload_file(
     session_id: Optional[str] = Cookie(None),
     file: UploadFile = File(...),
     s3_service: S3 = Depends(S3),
+    lambda_service: LambdaService = Depends(LambdaService),
 ):
     """
     Process the uploaded CSV file by:
@@ -231,110 +232,38 @@ async def upload_file(
     )
 
     try:
-        # 3. Read CSV into a DataFrame using pyarrow for speed/efficiency
-        df = pd.read_csv(file.file, engine="pyarrow", dtype_backend="pyarrow")
-
-        # 4. Add a unique 'id' column (using the DataFrame's index)
-        df.reset_index(drop=True, inplace=True)
-        df["id"] = df.index
-
-        # 5. Extract meta columns to preserve key identifiers
-        meta_columns = ["id", "Flow ID", "Timestamp", "Src IP", "Dst IP"]
-        meta_df = df[meta_columns].copy()
-
-        # 6. Drop columns not needed for model prediction.
-        #    (We want to keep 'id' so that we can reference rows later.)
-        irrelevant_columns = [
-            "Flow ID",
-            "Attempted Category",
-            "Timestamp",
-            "Src IP",
-            "Dst IP",
-            "Hour",
-            "Day",
-        ]
-        df.drop(columns=irrelevant_columns, axis=1, inplace=True, errors="ignore")
-
-        # 7. Clean data: replace infinities and drop any rows with missing values.
-        df.replace([np.inf, -np.inf], np.nan, inplace=True)
-        df.dropna(axis=0, how="any", inplace=True)
-
-        # 8. Load pre-trained model and scaler
-        model = xgb.Booster()
-        model.load_model(os.path.join("model", "xgb_booster.model"))
-        scaler = joblib.load(os.path.join("model", "scaler.pkl"))
-
-        # 9. Define features that the model expects
-        feature_cols = [
-            "Src Port",
-            "Dst Port",
-            "Total TCP Flow Time",
-            "Bwd Init Win Bytes",
-            "Bwd Packet Length Std",
-            "Total Length of Fwd Packet",
-            "Fwd Packet Length Max",
-            "Bwd IAT Mean",
-            "Flow IAT Min",
-            "Fwd PSH Flags",
-        ]
-        X = df[feature_cols]
-        X_scaled = scaler.transform(X)
-        dmatrix = xgb.DMatrix(X_scaled)
-
-        # 10. Predict class probabilities and decode the labels
-        predictions = model.predict(dmatrix)
-        predicted_indices = np.argmax(predictions, axis=1)
-        label_encoder_path = os.path.join("model", "label_encoder.pkl")
-        label_encoder = joblib.load(label_encoder_path)
-        decoded_labels = label_encoder.inverse_transform(predicted_indices)
-
-        # 11. Attach the predicted labels to the DataFrame
-        df["Label"] = decoded_labels
-
-        # 12. Re-combine meta data with the processed DataFrame
-        processed_df = pd.concat([meta_df, df], axis=1)
-        print(f"Processed DataFrame shape:\n{processed_df.head(10)}")
-
-        # 13. Write the processed DataFrame to an in-memory CSV buffer
-        processed_buffer = io.BytesIO()
-        processed_df.to_csv(processed_buffer, index=False)
-        processed_buffer.seek(0)
-
-        # 14. Prepare UploadFile objects for raw and processed files.
-        #    Note: After reading the CSV, the file pointer is at the end,
-        #          so we must reset it to 0 to capture the raw file content.
         file.file.seek(0)
         raw_file = UploadFile(filename=f"{file.filename}", file=file.file)
-        processed_file = UploadFile(filename=f"{file.filename}", file=processed_buffer)
 
-        # Create two tasks for parallel uploads
-        upload_tasks = [
-            s3_service.upload(
-                file=raw_file,
-                file_path=f"network-file/raw/{raw_file.filename}",
-                session_id=session_id,
-            ),
-            s3_service.upload(
-                file=processed_file,
-                file_path=f"network-file/model-applied/{processed_file.filename}",
-                session_id=session_id,
-            ),
-        ]
+        raw_file_info = await s3_service.upload(
+            file=raw_file,
+            file_path=f"network-file/raw/{raw_file.filename}",
+            session_id=session_id,
+        )
 
-        # Run both upload tasks concurrently
-        _, processed_upload_output = await asyncio.gather(*upload_tasks)
+        lambda_service_payload = {
+            "data": {
+                "raw_file_path": raw_file_info.get("s3_key"),
+                "model_applied_file_path": f"uploads/{session_id}/network-file/model-applied/{raw_file.filename}",
+            }
+        }
 
-        # Retrieve the S3 key from the processed file upload
-        s3_key = processed_upload_output.get("s3_key")
+        lambda_inference_output = await lambda_service.invoke_function(
+            function_name="inference_func",
+            function_params=lambda_service_payload,
+        )
+        model_applied_s3_key = lambda_inference_output.get("file_key")
 
         # 17. Store or update the session data in Redis with the processed file's S3 key
-        redis_client.set_session_data(session_id, s3_key, ttl_in_seconds=43200)
+        redis_client.set_session_data(
+            session_id, model_applied_s3_key, ttl_in_seconds=43200
+        )
 
         return {
             "content": {
                 "message": "DataFrame successfully processed and stored in session.",
                 "session_id": session_id,
-                "s3_key": s3_key,
+                "s3_key": model_applied_s3_key,
             },
             "status_code": 200,
         }
@@ -396,7 +325,6 @@ async def get_attack_detection_brief_scatter(
         }
 
     except Exception as e:
-        print(e)
         return Response(status_code=400, content="Failed to retrieve data.")
 
 
@@ -414,11 +342,8 @@ async def raw_file_upload(
         raise ValueError("file missing")
 
     if not session_id:
-        print("No session ID found.")
         # If the user doesn't have a session_id, create a new one
         session_id = str(uuid.uuid4())
-        # Set the cookie with a 5-minute expiration
-        print("New session ID created:", session_id)
         response.set_cookie(
             key=SESSION_COOKIE_NAME,
             value=session_id,
@@ -431,13 +356,10 @@ async def raw_file_upload(
     try:
         # Upload the raw file to S3
         upload_output = await s3_service.upload(file, file.filename, session_id)
-        print("upload output:", upload_output)
         s3_key = upload_output.get("s3_key")
-        print(f"File uploaded to S3 with key: {s3_key}")
 
         # Store or update the session data in Redis with a 5-minute TTL
         redis_client.set_session_data(session_id, s3_key, ttl_in_seconds=19960)
-        print("Session data stored in Redis.")
         return {
             "message": "File successfully stored in session.",
             "session_id": session_id,
@@ -462,8 +384,6 @@ async def get_file_name(session_id: str = Cookie(None)):
     session_data = redis_client.get_session_data(session_id)
     if not session_data:
         return Response(status_code=400, content="Session Expired or not found")
-
-    print("Session data:", session_data)
 
     return {"file_name": session_data}
 

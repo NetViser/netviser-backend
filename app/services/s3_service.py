@@ -15,7 +15,7 @@ from app.configs.config import get_settings
 settings = get_settings()
 
 # Initialize a custom ThreadPoolExecutor
-executor = ThreadPoolExecutor(max_workers=20, thread_name_prefix="s3-upload-")
+executor = ThreadPoolExecutor(max_workers=50, thread_name_prefix="s3-upload-")
 
 
 class S3:
@@ -124,7 +124,6 @@ class S3:
                 },
                 ExpiresIn=expiration,
             )
-            print("URL", url)
             return url
         except ClientError as e:
             raise HTTPException(

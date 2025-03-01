@@ -15,6 +15,7 @@ router = APIRouter(prefix="/api/attack-detection/visualization", tags=["visualiz
 settings = get_settings()
 redis_client = RedisClient()
 
+
 @router.get("/attack-time-series", response_model=GetTimeSeriesAttackDataResponse)
 async def get_time_series_attack_data(
     attack_type: str,
@@ -71,7 +72,7 @@ async def get_time_series_attack_data(
         if feature_name not in df.columns:
             raise HTTPException(
                 status_code=400,
-                detail=f"Feature '{feature_name}' not found in CSV columns."
+                detail=f"Feature '{feature_name}' not found in CSV columns.",
             )
 
         # Convert chosen feature to numeric and drop invalid rows
@@ -83,9 +84,7 @@ async def get_time_series_attack_data(
         # -----------------------------------------------------------------------
         df["is_attack_type"] = np.where(df["Label"] == attack_type, 1, 0)
         df["is_other_attack"] = np.where(
-            (df["Label"] != "BENIGN") & (df["Label"] != attack_type),
-            1,
-            0
+            (df["Label"] != "BENIGN") & (df["Label"] != attack_type), 1, 0
         )
 
         # -----------------------------------------------------------------------
@@ -106,6 +105,7 @@ async def get_time_series_attack_data(
             elif row["OtherAttackCount"] > 0:
                 return "other"
             return "none"
+
         grouped["attack"] = grouped.apply(label_bin, axis=1)
 
         grouped.index.name = "Timestamp"
@@ -126,7 +126,7 @@ async def get_time_series_attack_data(
                     "feature": feature_name,
                 },
                 "highlight": [],
-                "partitions": []
+                "partitions": [],
             }
 
         current_start_idx = 0
@@ -141,7 +141,9 @@ async def get_time_series_attack_data(
                 end_ts = grouped.loc[i - 1, "Timestamp"]
                 # Add partition only if it contains the attack type
                 partition_data = grouped.iloc[current_start_idx:i]
-                if partition_data['AttackTypeCount'].sum() > 0:  # Check if the partition contains the attack type
+                if (
+                    partition_data["AttackTypeCount"].sum() > 0
+                ):  # Check if the partition contains the attack type
                     partitions_info.append((current_start_idx, i - 1, start_ts, end_ts))
                 else:
                     print("Skipping partition:", start_ts, end_ts)
@@ -151,9 +153,13 @@ async def get_time_series_attack_data(
         # Add the last partition
         start_ts = grouped.loc[current_start_idx, "Timestamp"]
         end_ts = grouped.loc[len(grouped) - 1, "Timestamp"]
-        partition_data = grouped.iloc[current_start_idx:len(grouped)]
-        if partition_data["AttackTypeCount"].sum() > 0:  # Check if the partition contains the attack type
-            partitions_info.append((current_start_idx, len(grouped) - 1, start_ts, end_ts))
+        partition_data = grouped.iloc[current_start_idx : len(grouped)]
+        if (
+            partition_data["AttackTypeCount"].sum() > 0
+        ):  # Check if the partition contains the attack type
+            partitions_info.append(
+                (current_start_idx, len(grouped) - 1, start_ts, end_ts)
+            )
 
         partitions_boundary = [
             {"start": st.isoformat(), "end": et.isoformat()}
@@ -166,7 +172,7 @@ async def get_time_series_attack_data(
         if partition_index >= len(partitions_info):
             raise HTTPException(
                 status_code=400,
-                detail=f"Invalid partition_index {partition_index}. Only {len(partitions_info)} partition(s) available."
+                detail=f"Invalid partition_index {partition_index}. Only {len(partitions_info)} partition(s) available.",
             )
 
         # Slice the DataFrame to the requested partition
@@ -197,7 +203,11 @@ async def get_time_series_attack_data(
         # 8. Build highlight intervals for this partition
         # -----------------------------------------------------------------------
         df_part["attack_name"] = df_part["attack"].apply(
-            lambda x: attack_type if x == "match" else ("otherAttack" if x == "other" else None)
+            lambda x: (
+                attack_type
+                if x == "match"
+                else ("otherAttack" if x == "other" else None)
+            )
         )
         highlight = []
         current_attack = None
@@ -211,10 +221,12 @@ async def get_time_series_attack_data(
             if row_attack is None:
                 if current_attack is not None and start_ts_p is not None:
                     end_ts_p = prev_ts_p if prev_ts_p is not None else ts
-                    highlight.append([
-                        {"name": current_attack, "xAxis": start_ts_p.isoformat()},
-                        {"xAxis": end_ts_p.isoformat()}
-                    ])
+                    highlight.append(
+                        [
+                            {"name": current_attack, "xAxis": start_ts_p.isoformat()},
+                            {"xAxis": end_ts_p.isoformat()},
+                        ]
+                    )
                     current_attack = None
                     start_ts_p = None
             else:
@@ -224,19 +236,26 @@ async def get_time_series_attack_data(
                 elif row_attack != current_attack:
                     if start_ts_p is not None:
                         end_ts_p = prev_ts_p if prev_ts_p is not None else ts
-                        highlight.append([
-                            {"name": current_attack, "xAxis": start_ts_p.isoformat()},
-                            {"xAxis": end_ts_p.isoformat()}
-                        ])
+                        highlight.append(
+                            [
+                                {
+                                    "name": current_attack,
+                                    "xAxis": start_ts_p.isoformat(),
+                                },
+                                {"xAxis": end_ts_p.isoformat()},
+                            ]
+                        )
                     current_attack = row_attack
                     start_ts_p = ts
             prev_ts_p = ts
 
         if current_attack is not None and start_ts_p is not None:
-            highlight.append([
-                {"name": current_attack, "xAxis": start_ts_p.isoformat()},
-                {"xAxis": prev_ts_p.isoformat()}
-            ])
+            highlight.append(
+                [
+                    {"name": current_attack, "xAxis": start_ts_p.isoformat()},
+                    {"xAxis": prev_ts_p.isoformat()},
+                ]
+            )
 
         # -----------------------------------------------------------------------
         # 9. Build final response object
@@ -251,7 +270,7 @@ async def get_time_series_attack_data(
             },
             "highlight": highlight,
             "partitions": partitions_boundary,
-            "current_partition_index": partition_index  # Add current partition index
+            "current_partition_index": partition_index,  # Add current partition index
         }
 
         return response_json
@@ -262,6 +281,5 @@ async def get_time_series_attack_data(
             raise e
         print("Error in get_time_series_attack_data:", e)
         raise HTTPException(
-            status_code=500,
-            detail="Failed to retrieve time-series data."
+            status_code=500, detail="Failed to retrieve time-series data."
         )
