@@ -23,8 +23,14 @@ redis_client = RedisClient()
 
 # Map attack types to their feature extraction functions and feature names
 ATTACK_TYPE_CONFIG = {
-    "Portscan": {"func": portscan_feature_extraction, "feature_name": "Unique Dst Port Count Per Second"},
-    "DDoS": {"func": ddos_feature_extraction, "feature_name": "Packet Count Per Second"},
+    "Portscan": {
+        "func": portscan_feature_extraction,
+        "feature_name": "Unique Dst Port Count Per Second",
+    },
+    "DDoS": {
+        "func": ddos_feature_extraction,
+        "feature_name": "Packet Count Per Second",
+    },
     "FTP-Patator": {
         "func": ftp_patator_feature_extraction,
         "feature_name": "Total Length of Fwd Packet",
