@@ -1,19 +1,41 @@
+# app/routers/attack_visualization.py
 from datetime import timedelta
-
-from app.schemas.attack_visualization import GetTimeSeriesAttackDataResponse
 from fastapi import APIRouter, Depends, HTTPException, Cookie, Query
 from typing import Optional
 import pandas as pd
 import numpy as np
 import io
 
+from app.schemas.attack_visualization import GetTimeSeriesAttackDataResponse
 from app.services.s3_service import S3
 from app.services.redis_service import RedisClient
 from app.configs.config import get_settings
+from app.utils.attack_features import (
+    portscan_feature_extraction,
+    ddos_feature_extraction,
+    ftp_patator_feature_extraction,
+    default_feature_extraction,
+)
 
 router = APIRouter(prefix="/api/attack-detection/visualization", tags=["visualization"])
 settings = get_settings()
 redis_client = RedisClient()
+
+# Map attack types to their feature extraction functions and feature names
+ATTACK_TYPE_CONFIG = {
+    "Portscan": {
+        "func": portscan_feature_extraction,
+        "feature_name": "Unique Dst Port Count Per Second",
+    },
+    "DDoS": {
+        "func": ddos_feature_extraction,
+        "feature_name": "Packet Count Per Second",
+    },
+    "FTP-Patator": {
+        "func": ftp_patator_feature_extraction,
+        "feature_name": "Total Length of Fwd Packet",
+    },
+}
 
 
 @router.get("/attack-time-series", response_model=GetTimeSeriesAttackDataResponse)
@@ -23,25 +45,9 @@ async def get_time_series_attack_data(
     partition_index: int = Query(0, ge=0),
     s3_service: S3 = Depends(S3),
 ):
-    """
-    Return a JSON payload of time-series data, partitioned by 1-hour gaps.
-    By default, returns data for partition_index=0 (the first partition).
-
-    The response includes:
-      - data: {
-          timestamps: [...],
-          values: [...],
-          attackMarkPoint: [[ts, val], ...],
-          otherAttackMarkPoint: [[ts, val], ...],
-          feature: <dynamic feature column>
-        },
-      - highlight: [ [ {name, xAxis}, {xAxis} ], ... ],
-      - partitions: [ {start: <ISO>, end: <ISO>}, ... ]
-    """
     if not session_id:
         raise HTTPException(status_code=400, detail="Session ID missing")
 
-    # Retrieve the S3 key from Redis
     s3_key = redis_client.get_session_data(session_id)
     if not s3_key:
         raise HTTPException(status_code=400, detail="Session Expired or not found")
@@ -56,48 +62,28 @@ async def get_time_series_attack_data(
         print("Original data shape:", df.shape)
 
         # -----------------------------------------------------------------------
-        # 2. Decide which feature column to chart, based on attack_type
+        # 2. Parse Timestamp
         # -----------------------------------------------------------------------
-        attackTypeFeatureMap = {
-            "DDoS": "Bwd Packet Length Mean",
-            "FTP-Patator": "Total Length of Fwd Packet",
-        }
-        feature_name = attackTypeFeatureMap.get(attack_type, "Flow Bytes/s")
-
-        # Parse Timestamp as datetime (assuming ms)
         df["Timestamp"] = pd.to_datetime(df["Timestamp"], unit="ms", errors="coerce")
         df.dropna(subset=["Timestamp"], inplace=True)
 
-        # Check if chosen feature exists
-        if feature_name not in df.columns:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Feature '{feature_name}' not found in CSV columns.",
-            )
-
-        # Convert chosen feature to numeric and drop invalid rows
-        df[feature_name] = pd.to_numeric(df[feature_name], errors="coerce")
-        df.dropna(subset=[feature_name], inplace=True)
-
         # -----------------------------------------------------------------------
-        # 3. Define numeric flags for attack classification
+        # 3. Select feature extraction function and feature name
         # -----------------------------------------------------------------------
-        df["is_attack_type"] = np.where(df["Label"] == attack_type, 1, 0)
-        df["is_other_attack"] = np.where(
-            (df["Label"] != "BENIGN") & (df["Label"] != attack_type), 1, 0
+        config = ATTACK_TYPE_CONFIG.get(
+            attack_type,
+            {"func": default_feature_extraction, "feature_name": "Flow Bytes/s"},
         )
+        feature_extraction_func = config["func"]
+        reported_feature_name = config["feature_name"]
 
         # -----------------------------------------------------------------------
-        # 4. Resample by 1-second bins
+        # 4. Extract features using the selected function
         # -----------------------------------------------------------------------
-        df.set_index("Timestamp", inplace=True)
-        grouped = df.resample("1s").agg(
-            FeatureMean=(feature_name, "mean"),
-            AttackTypeCount=("is_attack_type", "sum"),
-            OtherAttackCount=("is_other_attack", "sum"),
-            RowCount=(feature_name, "count"),
-        )
-        grouped = grouped[grouped["RowCount"] > 0]
+        grouped, feature_column_name = feature_extraction_func(df, attack_type)
+        grouped.index.name = "Timestamp"
+        grouped.reset_index(inplace=True)
+        grouped.sort_values("Timestamp", inplace=True)
 
         def label_bin(row):
             if row["AttackTypeCount"] > 0:
@@ -108,14 +94,10 @@ async def get_time_series_attack_data(
 
         grouped["attack"] = grouped.apply(label_bin, axis=1)
 
-        grouped.index.name = "Timestamp"
-        grouped.reset_index(inplace=True)
-        grouped.sort_values("Timestamp", inplace=True)
-
         # -----------------------------------------------------------------------
         # 5. Partition the time-series based on gaps > 1 hour
         # -----------------------------------------------------------------------
-        partitions_info = []  # List of tuples: (start_idx, end_idx, start_ts, end_ts)
+        partitions_info = []
         if len(grouped) == 0:
             return {
                 "data": {
@@ -123,7 +105,7 @@ async def get_time_series_attack_data(
                     "values": [],
                     "attackMarkPoint": [],
                     "otherAttackMarkPoint": [],
-                    "feature": feature_name,
+                    "feature": reported_feature_name,
                 },
                 "highlight": [],
                 "partitions": [],
@@ -139,24 +121,18 @@ async def get_time_series_attack_data(
             if current_timestamp - prev_timestamp > timedelta(hours=1):
                 start_ts = grouped.loc[current_start_idx, "Timestamp"]
                 end_ts = grouped.loc[i - 1, "Timestamp"]
-                # Add partition only if it contains the attack type
                 partition_data = grouped.iloc[current_start_idx:i]
-                if (
-                    partition_data["AttackTypeCount"].sum() > 0
-                ):  # Check if the partition contains the attack type
+                if partition_data["AttackTypeCount"].sum() > 0:
                     partitions_info.append((current_start_idx, i - 1, start_ts, end_ts))
                 else:
                     print("Skipping partition:", start_ts, end_ts)
                 current_start_idx = i
             prev_timestamp = current_timestamp
 
-        # Add the last partition
         start_ts = grouped.loc[current_start_idx, "Timestamp"]
         end_ts = grouped.loc[len(grouped) - 1, "Timestamp"]
         partition_data = grouped.iloc[current_start_idx : len(grouped)]
-        if (
-            partition_data["AttackTypeCount"].sum() > 0
-        ):  # Check if the partition contains the attack type
+        if partition_data["AttackTypeCount"].sum() > 0:
             partitions_info.append(
                 (current_start_idx, len(grouped) - 1, start_ts, end_ts)
             )
@@ -175,12 +151,11 @@ async def get_time_series_attack_data(
                 detail=f"Invalid partition_index {partition_index}. Only {len(partitions_info)} partition(s) available.",
             )
 
-        # Slice the DataFrame to the requested partition
         part_start_i, part_end_i, part_st, part_et = partitions_info[partition_index]
         df_part = grouped.iloc[part_start_i : part_end_i + 1].copy()
 
         # -----------------------------------------------------------------------
-        # 7. Build arrays for timestamps, values, and mark points for this partition
+        # 7. Build arrays for timestamps, values, and mark points
         # -----------------------------------------------------------------------
         timestamps = []
         values = []
@@ -189,7 +164,11 @@ async def get_time_series_attack_data(
 
         for _, row in df_part.iterrows():
             ts = row["Timestamp"]
-            val = row["FeatureMean"] if not pd.isna(row["FeatureMean"]) else 0.0
+            val = (
+                row[feature_column_name]
+                if not pd.isna(row[feature_column_name])
+                else 0.0
+            )
             rounded_val = round(float(val), 3)
             timestamps.append(ts.isoformat())
             values.append(rounded_val)
@@ -200,7 +179,7 @@ async def get_time_series_attack_data(
                 otherAttackMarkPoint.append([ts.isoformat(), rounded_val])
 
         # -----------------------------------------------------------------------
-        # 8. Build highlight intervals for this partition
+        # 8. Build highlight intervals
         # -----------------------------------------------------------------------
         df_part["attack_name"] = df_part["attack"].apply(
             lambda x: (
@@ -266,17 +245,16 @@ async def get_time_series_attack_data(
                 "values": values,
                 "attackMarkPoint": attackMarkPoint,
                 "otherAttackMarkPoint": otherAttackMarkPoint,
-                "feature": feature_name,
+                "feature": reported_feature_name,
             },
             "highlight": highlight,
             "partitions": partitions_boundary,
-            "current_partition_index": partition_index,  # Add current partition index
+            "current_partition_index": partition_index,
         }
 
         return response_json
 
     except Exception as e:
-        # If the caught exception is an HTTPException, re-raise it.
         if isinstance(e, HTTPException):
             raise e
         print("Error in get_time_series_attack_data:", e)
