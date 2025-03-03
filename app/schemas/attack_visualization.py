@@ -1,6 +1,7 @@
 from pydantic import BaseModel
 from typing import List, Optional, Union
 
+
 class DataSchema(BaseModel):
     """
     Defines the 'data' portion of the time-series response:
@@ -10,11 +11,13 @@ class DataSchema(BaseModel):
       - otherAttackMarkPoint: list of [timestamp, value] pairs for 'other' attacks
       - feature: e.g. 'Flow Bytes/s' or another selected feature
     """
+
     timestamps: List[str]
     values: List[float]
     attackMarkPoint: List[List[Union[str, float]]]
     otherAttackMarkPoint: List[List[Union[str, float]]]
     feature: str
+
 
 class HighlightItem(BaseModel):
     """
@@ -22,16 +25,20 @@ class HighlightItem(BaseModel):
     If it's the first item in the pair, 'name' can be your attack type
     or 'otherAttack'. If it's the second item, 'xAxis' remains.
     """
+
     name: Optional[str] = None
     xAxis: str
+
 
 class PartitionBoundary(BaseModel):
     """
     Represents a partition boundary,
     specifying start and end timestamps for that partition.
     """
+
     start: str
     end: str
+
 
 class GetTimeSeriesAttackDataResponse(BaseModel):
     """
@@ -55,6 +62,7 @@ class GetTimeSeriesAttackDataResponse(BaseModel):
         ]
       }
     """
+
     data: DataSchema
     highlight: List[List[HighlightItem]]
     partitions: List[PartitionBoundary] = []

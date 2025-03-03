@@ -2,8 +2,12 @@ import importlib
 import os
 from fastapi import APIRouter, FastAPI
 from app.routes.xai.xai_routes import router as xai_router
-from app.routes.attack_visualization.attack_visualization_routes import router as attack_visualization_router
-from app.routes.attack_detection.attack_detection_specific_route import router as attack_detection_specific_router
+from app.routes.attack_visualization.attack_visualization_routes import (
+    router as attack_visualization_router,
+)
+from app.routes.attack_detection.attack_detection_specific_route import (
+    router as attack_detection_specific_router,
+)
 from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()

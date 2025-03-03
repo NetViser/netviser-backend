@@ -7,6 +7,7 @@ from app.configs.config import get_settings
 
 settings = get_settings()
 
+
 class LambdaService:
     """
     Singleton class for interacting with AWS Lambda for asynchronous invocation (Event).
@@ -59,17 +60,18 @@ class LambdaService:
             response = self.client.invoke(
                 FunctionName=self.functions[function_name],
                 InvocationType="RequestResponse",
-                Payload=json.dumps(function_params),  # The payload must be a JSON string
+                Payload=json.dumps(
+                    function_params
+                ),  # The payload must be a JSON string
             )
 
             payload = response.get("Payload").read()
-            body = json.loads(payload)['body']
+            body = json.loads(payload)["body"]
 
             # Return only the status code as per the requirement
-            return {
-                "statusCode": response["StatusCode"],
-                **body
-            }
+            return {"statusCode": response["StatusCode"], **body}
 
         except ClientError as e:
-            raise HTTPException(status_code=500, detail="Failed to invoke Lambda function.") from e
+            raise HTTPException(
+                status_code=500, detail="Failed to invoke Lambda function."
+            ) from e
