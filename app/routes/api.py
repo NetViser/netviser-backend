@@ -247,32 +247,28 @@ async def upload_file(
                 }
             }
 
-        if samplefile:
-            if samplefile == "ssh-ftp.csv":
-                sample_key = "sample/ssh-ftp.csv"
-            elif samplefile == "ddos-ftp.csv":
-                sample_key = "sample/ddos-ftp.csv"
-            elif samplefile == "ftp_patator_occurence.csv":
-                sample_key = "sample/ftp_patator_occurence.csv"
-            elif samplefile == "portscan_dos_hulk_slowloris.csv":
-                sample_key = "sample/portscan_dos_hulk_slowloris.csv"
-            elif samplefile == "portscan_dos_hulk.csv":
-                sample_key = "sample/portscan_dos_hulk.csv"
-            elif samplefile == "portscan.csv":
-                sample_key = "sample/portscan.csv"
+            lambda_inference_output = await lambda_service.invoke_function(
+                function_name="inference_func",
+                function_params=lambda_service_payload,
+            )
 
-            lambda_service_payload = {
-                "data": {
-                    "raw_file_path": sample_key,
-                    "model_applied_file_path": f"uploads/{session_id}/network-file/model-applied/{samplefile}",
-                }
+            model_applied_s3_key = lambda_inference_output.get("file_key")
+
+            return_msg = "DataFrame successfully processed and stored in session."
+
+        else:
+            sample_mapping = {
+                "ssh-ftp.csv": "sample/model-applied/ssh-ftp.csv",
+                "ddos-ftp.csv": "sample/model-applied/ddos-ftp.csv",
+                "ftp_patator_occurence.csv": "sample/model-applied/ftp_patator_occurence.csv",
+                "portscan_dos_hulk_slowloris.csv": "sample/model-applied/portscan_dos_hulk_slowloris.csv",
+                "portscan_dos_hulk.csv": "sample/model-applied/portscan_dos_hulk.csv",
+                "portscan.csv": "sample/model-applied/portscan.csv",
             }
 
-        lambda_inference_output = await lambda_service.invoke_function(
-            function_name="inference_func",
-            function_params=lambda_service_payload,
-        )
-        model_applied_s3_key = lambda_inference_output.get("file_key")
+            model_applied_s3_key = sample_mapping.get(samplefile)
+
+            return_msg = "Sample file successfully processed and stored in session."
 
         # 17. Store or update the session data in Redis with the processed file's S3 key
         redis_client.set_session_data(
@@ -281,7 +277,7 @@ async def upload_file(
 
         return {
             "content": {
-                "message": "DataFrame successfully processed and stored in session.",
+                "message": return_msg,
                 "session_id": session_id,
                 "s3_key": model_applied_s3_key,
             },
