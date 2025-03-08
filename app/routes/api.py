@@ -1,9 +1,7 @@
-import asyncio
 from collections import Counter
 import io
 import uuid
 
-import numpy as np
 from app.services.lambda_service import LambdaService
 from app.services.redis_service import RedisClient
 from fastapi import (
@@ -18,10 +16,6 @@ from fastapi import (
 )
 from typing import Optional
 from app.configs.config import get_settings
-import xgboost as xgb
-import pandas as pd
-import os
-import joblib
 from app.services.s3_service import S3
 from app.services.input_handle_service import preprocess
 
@@ -203,7 +197,8 @@ async def fetch_attack_records(
 async def upload_file(
     response: Response,
     session_id: Optional[str] = Cookie(None),
-    file: UploadFile = File(...),
+    file: Optional[UploadFile] = File(None),
+    samplefile: Optional[str] = None,
     s3_service: S3 = Depends(S3),
     lambda_service: LambdaService = Depends(LambdaService),
 ):
@@ -217,8 +212,11 @@ async def upload_file(
       6. Storing the S3 key of the processed file in the Redis session.
     """
     # 1. Validate input file
-    if not file:
-        raise ValueError("File missing")
+
+    print(f"Sample file: {samplefile}")
+    if not samplefile:
+        if not file:
+            raise ValueError("File missing")
 
     # 2. Create a new session
     session_id = str(uuid.uuid4())
@@ -232,27 +230,45 @@ async def upload_file(
     )
 
     try:
-        file.file.seek(0)
-        raw_file = UploadFile(filename=f"{file.filename}", file=file.file)
+        if not samplefile:
+            file.file.seek(0)
+            raw_file = UploadFile(filename=f"{file.filename}", file=file.file)
 
-        raw_file_info = await s3_service.upload(
-            file=raw_file,
-            file_path=f"network-file/raw/{raw_file.filename}",
-            session_id=session_id,
-        )
+            raw_file_info = await s3_service.upload(
+                file=raw_file,
+                file_path=f"network-file/raw/{raw_file.filename}",
+                session_id=session_id,
+            )
 
-        lambda_service_payload = {
-            "data": {
-                "raw_file_path": raw_file_info.get("s3_key"),
-                "model_applied_file_path": f"uploads/{session_id}/network-file/model-applied/{raw_file.filename}",
+            lambda_service_payload = {
+                "data": {
+                    "raw_file_path": raw_file_info.get("s3_key"),
+                    "model_applied_file_path": f"uploads/{session_id}/network-file/model-applied/{raw_file.filename}",
+                }
             }
-        }
 
-        lambda_inference_output = await lambda_service.invoke_function(
-            function_name="inference_func",
-            function_params=lambda_service_payload,
-        )
-        model_applied_s3_key = lambda_inference_output.get("file_key")
+            lambda_inference_output = await lambda_service.invoke_function(
+                function_name="inference_func",
+                function_params=lambda_service_payload,
+            )
+
+            model_applied_s3_key = lambda_inference_output.get("file_key")
+
+            return_msg = "DataFrame successfully processed and stored in session."
+
+        else:
+            sample_mapping = {
+                "ssh-ftp.csv": "sample/model-applied/ssh-ftp.csv",
+                "ddos-ftp.csv": "sample/model-applied/ddos-ftp.csv",
+                "ftp_patator_occurence.csv": "sample/model-applied/ftp_patator_occurence.csv",
+                "portscan_dos_hulk_slowloris.csv": "sample/model-applied/portscan_dos_hulk_slowloris.csv",
+                "portscan_dos_hulk.csv": "sample/model-applied/portscan_dos_hulk.csv",
+                "portscan.csv": "sample/model-applied/portscan.csv",
+            }
+
+            model_applied_s3_key = sample_mapping.get(samplefile)
+
+            return_msg = "Sample file successfully processed and stored in session."
 
         # 17. Store or update the session data in Redis with the processed file's S3 key
         redis_client.set_session_data(
@@ -261,7 +277,7 @@ async def upload_file(
 
         return {
             "content": {
-                "message": "DataFrame successfully processed and stored in session.",
+                "message": return_msg,
                 "session_id": session_id,
                 "s3_key": model_applied_s3_key,
             },
@@ -324,7 +340,7 @@ async def get_attack_detection_brief_scatter(
             "feature_name": "Flow Bytes/s",
         }
 
-    except Exception as e:
+    except Exception:
         return Response(status_code=400, content="Failed to retrieve data.")
 
 
