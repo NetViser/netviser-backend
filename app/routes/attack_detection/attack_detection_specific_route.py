@@ -161,9 +161,9 @@ async def get_specific_attack_detection(
 
         # Convert units from microseconds to seconds
         fields_to_convert = [
-            "Flow Duration",      # Maps to flowDuration
-            "Bwd IAT Mean",       # Maps to bwdIATMean
-            "Total TCP Flow Time" # Maps to totalTCPFlowTime
+            "Flow Duration",  # Maps to flowDuration
+            "Bwd IAT Mean",  # Maps to bwdIATMean
+            "Total TCP Flow Time",  # Maps to totalTCPFlowTime
         ]
         for field in fields_to_convert:
             if field in data_frame.columns:

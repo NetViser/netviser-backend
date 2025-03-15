@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     LAMBDA_INFERENCE_FUNCTION_NAME: Optional[str] = None
 
     STAGE: Optional[str] = None
+    MAX_UPLOAD_SIZE: Optional[int] = None
 
     model_config = SettingsConfigDict(env_file=".env")
 

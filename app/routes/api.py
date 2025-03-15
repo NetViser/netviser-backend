@@ -211,12 +211,29 @@ async def upload_file(
       5. Uploading both the raw file and processed CSV to S3 in separate folders.
       6. Storing the S3 key of the processed file in the Redis session.
     """
-    # 1. Validate input file
+    # Determine the maximum upload size (default to 10MB if not defined)
+    MAX_UPLOAD_SIZE = getattr(
+        settings, "MAX_UPLOAD_SIZE", 10 * 1024 * 1024
+    )  # 10MB in bytes
+    print(f"MAX_UPLOAD_SIZE: {MAX_UPLOAD_SIZE}")
 
+    # 1. Validate input file
     print(f"Sample file: {samplefile}")
     if not samplefile:
         if not file:
             raise ValueError("File missing")
+
+        # Check file size before processing
+        file.file.seek(0, 2)  # Move to the end of the file to get size
+        file_size = file.file.tell()
+        file.file.seek(0)  # Reset file pointer to the beginning
+        print(f"File size: {file_size}")
+
+        if file_size > MAX_UPLOAD_SIZE:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File size exceeds the maximum limit of {MAX_UPLOAD_SIZE / (1024 * 1024)} MB.",
+            )
 
     # 2. Create a new session
     session_id = str(uuid.uuid4())
@@ -231,7 +248,6 @@ async def upload_file(
 
     try:
         if not samplefile:
-            file.file.seek(0)
             raw_file = UploadFile(filename=f"{file.filename}", file=file.file)
 
             raw_file_info = await s3_service.upload(
@@ -270,7 +286,7 @@ async def upload_file(
 
             return_msg = "Sample file successfully processed and stored in session."
 
-        # 17. Store or update the session data in Redis with the processed file's S3 key
+        # Store or update the session data in Redis with the processed file's S3 key
         redis_client.set_session_data(
             session_id, model_applied_s3_key, ttl_in_seconds=43200
         )

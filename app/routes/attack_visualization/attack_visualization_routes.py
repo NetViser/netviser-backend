@@ -33,30 +33,57 @@ FEATURE_UNITS: Dict[str, str] = {
 # Updated configuration structure referencing feature names and using the units map
 TIMESERIES_VISUALIZATION_CONFIG: Dict[str, List[Dict[str, Union[str, Callable]]]] = {
     "Portscan": [
-        {"func": dst_port_count_per_sec_feature_extraction, "feature_name": "Unique Dst Port Count Per Second"},
-        {"func": total_length_of_fwd_packet_feature_extraction, "feature_name": "Total Length of Fwd Packet"},
+        {
+            "func": dst_port_count_per_sec_feature_extraction,
+            "feature_name": "Unique Dst Port Count Per Second",
+        },
+        {
+            "func": total_length_of_fwd_packet_feature_extraction,
+            "feature_name": "Total Length of Fwd Packet",
+        },
         {"func": flow_duration_feature_extraction, "feature_name": "Flow Duration"},
     ],
     "DDoS": [
-        {"func": packet_count_per_sec_feature_extraction, "feature_name": "Packet Count Per Second"},
-        {"func": total_length_of_fwd_packet_feature_extraction, "feature_name": "Total Length of Fwd Packet"},
+        {
+            "func": packet_count_per_sec_feature_extraction,
+            "feature_name": "Packet Count Per Second",
+        },
+        {
+            "func": total_length_of_fwd_packet_feature_extraction,
+            "feature_name": "Total Length of Fwd Packet",
+        },
         {"func": flow_duration_feature_extraction, "feature_name": "Flow Duration"},
     ],
     "FTP-Patator": [
-        {"func": total_length_of_fwd_packet_feature_extraction, "feature_name": "Total Length of Fwd Packet"},
-        {"func": packet_count_per_sec_feature_extraction, "feature_name": "Packet Count Per Second"},
+        {
+            "func": total_length_of_fwd_packet_feature_extraction,
+            "feature_name": "Total Length of Fwd Packet",
+        },
+        {
+            "func": packet_count_per_sec_feature_extraction,
+            "feature_name": "Packet Count Per Second",
+        },
     ],
     "SSH-Patator": [
         {"func": flow_duration_feature_extraction, "feature_name": "Flow Duration"},
-        {"func": dst_port_count_per_sec_feature_extraction, "feature_name": "Unique Dst Port Count Per Second"},
+        {
+            "func": dst_port_count_per_sec_feature_extraction,
+            "feature_name": "Unique Dst Port Count Per Second",
+        },
     ],
     "DoS Slowloris": [
         {"func": flow_duration_feature_extraction, "feature_name": "Flow Duration"},
-        {"func": dst_port_count_per_sec_feature_extraction, "feature_name": "Unique Dst Port Count Per Second"},
+        {
+            "func": dst_port_count_per_sec_feature_extraction,
+            "feature_name": "Unique Dst Port Count Per Second",
+        },
         {"func": bwd_iat_mean_feature_extraction, "feature_name": "Bwd IAT Mean"},
     ],
     "DoS Hulk": [
-        {"func": dst_port_count_per_sec_feature_extraction, "feature_name": "Unique Dst Port Count Per Second"},
+        {
+            "func": dst_port_count_per_sec_feature_extraction,
+            "feature_name": "Unique Dst Port Count Per Second",
+        },
         {"func": bwd_iat_mean_feature_extraction, "feature_name": "Bwd IAT Mean"},
         {"func": flow_duration_feature_extraction, "feature_name": "Flow Duration"},
     ],
@@ -98,7 +125,10 @@ async def get_time_series_attack_data(
         attack_configs = TIMESERIES_VISUALIZATION_CONFIG.get(
             attack_type,
             [
-                {"func": total_length_of_fwd_packet_feature_extraction, "feature_name": "Total Length of Fwd Packet"}
+                {
+                    "func": total_length_of_fwd_packet_feature_extraction,
+                    "feature_name": "Total Length of Fwd Packet",
+                }
             ],
         )
         selected_config = None
@@ -118,7 +148,9 @@ async def get_time_series_attack_data(
 
         feature_extraction_func = selected_config["func"]
         reported_feature_name = selected_config["feature_name"]
-        feature_unit = FEATURE_UNITS.get(reported_feature_name, "")  # Get unit from mapping
+        feature_unit = FEATURE_UNITS.get(
+            reported_feature_name, ""
+        )  # Get unit from mapping
 
         # -----------------------------------------------------------------------
         # 4. Extract features using the selected function
