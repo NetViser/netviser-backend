@@ -159,6 +159,16 @@ async def get_specific_attack_detection(
         data_frame = await preprocess(file_like_object)
         data_frame.reset_index(inplace=True)
 
+        # Convert units from microseconds to seconds
+        fields_to_convert = [
+            "Flow Duration",      # Maps to flowDuration
+            "Bwd IAT Mean",       # Maps to bwdIATMean
+            "Total TCP Flow Time" # Maps to totalTCPFlowTime
+        ]
+        for field in fields_to_convert:
+            if field in data_frame.columns:
+                data_frame[field] = data_frame[field].astype(float) / 1_000_000
+
         # Round specified fields to 2 decimal places and apply log scale
         fields_to_round = [
             "Flow Bytes/s",
