@@ -9,7 +9,7 @@ from app.services.s3_service import S3
 from app.services.redis_service import RedisClient
 from app.configs.config import get_settings
 from app.utils.attack_features import (
-    total_tcp_flow_time_feature_extraction,
+    flow_duration_feature_extraction,
     dst_port_count_per_sec_feature_extraction,
     packet_count_per_sec_feature_extraction,
     bwd_iat_mean_feature_extraction,
@@ -20,69 +20,45 @@ router = APIRouter(prefix="/api/attack-detection/visualization", tags=["visualiz
 settings = get_settings()
 redis_client = RedisClient()
 
-# Updated configuration structure supporting multiple features per attack type
+# Mapping of feature names to their units
+FEATURE_UNITS: Dict[str, str] = {
+    "Unique Dst Port Count Per Second": "count",
+    "Total Length of Fwd Packet": "bytes",
+    "Flow Duration": "seconds",
+    "Packet Count Per Second": "count",
+    "Bwd IAT Mean": "seconds",
+    # Add more features and units as needed
+}
+
+# Updated configuration structure referencing feature names and using the units map
 TIMESERIES_VISUALIZATION_CONFIG: Dict[str, List[Dict[str, Union[str, Callable]]]] = {
     "Portscan": [
-        {
-            "func": dst_port_count_per_sec_feature_extraction,
-            "feature_name": "Unique Dst Port Count Per Second",
-        },
-        {
-            "func": total_length_of_fwd_packet_feature_extraction,
-            "feature_name": "Total Length of Fwd Packet",
-        },
+        {"func": dst_port_count_per_sec_feature_extraction, "feature_name": "Unique Dst Port Count Per Second"},
+        {"func": total_length_of_fwd_packet_feature_extraction, "feature_name": "Total Length of Fwd Packet"},
+        {"func": flow_duration_feature_extraction, "feature_name": "Flow Duration"},
     ],
     "DDoS": [
-        {
-            "func": packet_count_per_sec_feature_extraction,
-            "feature_name": "Packet Count Per Second",
-        },
-        {
-            "func": total_length_of_fwd_packet_feature_extraction,
-            "feature_name": "Total Length of Fwd Packet",
-        },
+        {"func": packet_count_per_sec_feature_extraction, "feature_name": "Packet Count Per Second"},
+        {"func": total_length_of_fwd_packet_feature_extraction, "feature_name": "Total Length of Fwd Packet"},
+        {"func": flow_duration_feature_extraction, "feature_name": "Flow Duration"},
     ],
     "FTP-Patator": [
-        {
-            "func": total_length_of_fwd_packet_feature_extraction,
-            "feature_name": "Total Length of Fwd Packet",
-        },
-        {
-            "func": packet_count_per_sec_feature_extraction,
-            "feature_name": "Packet Count Per Second",
-        },
+        {"func": total_length_of_fwd_packet_feature_extraction, "feature_name": "Total Length of Fwd Packet"},
+        {"func": packet_count_per_sec_feature_extraction, "feature_name": "Packet Count Per Second"},
     ],
     "SSH-Patator": [
-        {
-            "func": total_tcp_flow_time_feature_extraction,
-            "feature_name": "Total TCP Flow Time",
-        },
-        {
-            "func": dst_port_count_per_sec_feature_extraction,
-            "feature_name": "Unique Dst Port Count Per Second",
-        },
+        {"func": flow_duration_feature_extraction, "feature_name": "Flow Duration"},
+        {"func": dst_port_count_per_sec_feature_extraction, "feature_name": "Unique Dst Port Count Per Second"},
     ],
     "DoS Slowloris": [
-        {
-            "func": total_tcp_flow_time_feature_extraction,
-            "feature_name": "Total TCP Flow Time",
-        },
-        {
-            "func": dst_port_count_per_sec_feature_extraction,
-            "feature_name": "Unique Dst Port Count Per Second",
-        },
+        {"func": flow_duration_feature_extraction, "feature_name": "Flow Duration"},
+        {"func": dst_port_count_per_sec_feature_extraction, "feature_name": "Unique Dst Port Count Per Second"},
         {"func": bwd_iat_mean_feature_extraction, "feature_name": "Bwd IAT Mean"},
     ],
     "DoS Hulk": [
-        {
-            "func": total_tcp_flow_time_feature_extraction,
-            "feature_name": "Total TCP Flow Time",
-        },
-        {
-            "func": dst_port_count_per_sec_feature_extraction,
-            "feature_name": "Unique Dst Port Count Per Second",
-        },
+        {"func": dst_port_count_per_sec_feature_extraction, "feature_name": "Unique Dst Port Count Per Second"},
         {"func": bwd_iat_mean_feature_extraction, "feature_name": "Bwd IAT Mean"},
+        {"func": flow_duration_feature_extraction, "feature_name": "Flow Duration"},
     ],
 }
 
@@ -122,10 +98,7 @@ async def get_time_series_attack_data(
         attack_configs = TIMESERIES_VISUALIZATION_CONFIG.get(
             attack_type,
             [
-                {
-                    "func": total_length_of_fwd_packet_feature_extraction,
-                    "feature_name": "Total Length of Fwd Packet",
-                }
+                {"func": total_length_of_fwd_packet_feature_extraction, "feature_name": "Total Length of Fwd Packet"}
             ],
         )
         selected_config = None
@@ -145,11 +118,16 @@ async def get_time_series_attack_data(
 
         feature_extraction_func = selected_config["func"]
         reported_feature_name = selected_config["feature_name"]
+        feature_unit = FEATURE_UNITS.get(reported_feature_name, "")  # Get unit from mapping
 
         # -----------------------------------------------------------------------
         # 4. Extract features using the selected function
         # -----------------------------------------------------------------------
-        grouped, feature_column_name = feature_extraction_func(df, attack_type, port_flag=attack_type == "FTP-Patator" or attack_type == "SSH-Patator")
+        grouped, feature_column_name = feature_extraction_func(
+            df,
+            attack_type,
+            port_flag=attack_type == "FTP-Patator" or attack_type == "SSH-Patator",
+        )
         grouped.index.name = "Timestamp"
         grouped.reset_index(inplace=True)
         grouped.sort_values("Timestamp", inplace=True)
@@ -175,6 +153,7 @@ async def get_time_series_attack_data(
                     "attackMarkPoint": [],
                     "otherAttackMarkPoint": [],
                     "feature": reported_feature_name,
+                    "feature_unit": feature_unit,
                     "port20MarkPoint": [] if attack_type == "FTP-Patator" else None,
                     "port21MarkPoint": [] if attack_type == "FTP-Patator" else None,
                     "port22MarkPoint": [] if attack_type == "SSH-Patator" else None,
@@ -325,6 +304,7 @@ async def get_time_series_attack_data(
             "values": values,
             "attackMarkPoint": attackMarkPoint,
             "otherAttackMarkPoint": otherAttackMarkPoint,
+            "feature_unit": feature_unit,
             "feature": reported_feature_name,
         }
         if attack_type == "FTP-Patator":

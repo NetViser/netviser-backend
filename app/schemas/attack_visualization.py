@@ -15,6 +15,7 @@ class DataSchema(BaseModel):
     """
     timestamps: List[str]
     values: List[float]
+    feature_unit: str
     attackMarkPoint: List[List[Union[str, float]]]
     otherAttackMarkPoint: List[List[Union[str, float]]]
     feature: str

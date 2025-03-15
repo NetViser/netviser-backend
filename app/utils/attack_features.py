@@ -236,6 +236,7 @@ def bwd_iat_mean_feature_extraction(
         raise ValueError(f"Column '{feature_name}' not found in CSV for Slowloris DoS analysis.")
     
     df[feature_name] = pd.to_numeric(df[feature_name], errors="coerce")
+    df[feature_name] = df[feature_name] / 1e6  # Convert microseconds to seconds
     df.dropna(subset=[feature_name], inplace=True)
     
     df["is_attack_type"] = np.where(df["Label"] == attack_type, 1, 0)
@@ -263,6 +264,62 @@ def bwd_iat_mean_feature_extraction(
         }
         agg_dict = {**agg_dict, **port_aggs}
         
+    grouped = df.resample("1s").agg(**agg_dict)
+    grouped = grouped[grouped["RowCount"] > 0]
+    return grouped, "FeatureMean"
+
+
+def flow_duration_feature_extraction(
+    df: pd.DataFrame, attack_type: str, port_flag: bool = False
+) -> tuple[pd.DataFrame, str]:
+    """
+    Extracts the mean flow duration per second for attack analysis.
+    Assumes a column named 'Flow Duration' exists in the DataFrame.
+    
+    The 'Flow Duration' values are assumed to be in microseconds.
+    They are converted to seconds by dividing by 1,000,000.
+    """
+    feature_name = "Flow Duration"
+    if feature_name not in df.columns:
+        raise ValueError(
+            f"Column '{feature_name}' not found in CSV for flow duration analysis."
+        )
+
+    # Convert the Flow Duration column to numeric and convert microseconds to seconds.
+    df[feature_name] = pd.to_numeric(df[feature_name], errors="coerce")
+    df[feature_name] = df[feature_name] / 1e6  # Convert microseconds to seconds
+    df.dropna(subset=[feature_name], inplace=True)
+
+    # Set up attack classification flags
+    df["is_attack_type"] = np.where(df["Label"] == attack_type, 1, 0)
+    df["is_other_attack"] = np.where(
+        (df["Label"] != "BENIGN") & (df["Label"] != attack_type), 1, 0
+    )
+
+    # Optionally add port flags if requested
+    if port_flag:
+        if "Dst Port" not in df.columns:
+            raise ValueError("Column 'Dst Port' not found for port features.")
+        df = add_ports_flag(df)
+
+    # Set Timestamp as index for resampling
+    df.set_index("Timestamp", inplace=True)
+
+    # Define aggregation: calculate the mean flow duration (in seconds) for each second
+    agg_dict = {
+        "FeatureMean": (feature_name, "mean"),
+        "AttackTypeCount": ("is_attack_type", "sum"),
+        "OtherAttackCount": ("is_other_attack", "sum"),
+        "RowCount": (feature_name, "count"),
+    }
+    if port_flag:
+        port_aggs = {
+            "is_port21": ("is_port21", "max"),
+            "is_port22": ("is_port22", "max"),
+            "is_port20": ("is_port20", "max"),
+        }
+        agg_dict = {**agg_dict, **port_aggs}
+
     grouped = df.resample("1s").agg(**agg_dict)
     grouped = grouped[grouped["RowCount"] > 0]
     return grouped, "FeatureMean"
