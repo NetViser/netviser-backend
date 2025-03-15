@@ -10,14 +10,17 @@ class DataSchema(BaseModel):
       - attackMarkPoint: list of [timestamp, value] pairs for user-specified attacks
       - otherAttackMarkPoint: list of [timestamp, value] pairs for 'other' attacks
       - feature: e.g. 'Flow Bytes/s' or another selected feature
+      - port21MarkPoint: list of [timestamp, value] pairs for FTP (port 21) events
+      - port22MarkPoint: list of [timestamp, value] pairs for SSH (port 22) events
     """
-
     timestamps: List[str]
     values: List[float]
     attackMarkPoint: List[List[Union[str, float]]]
     otherAttackMarkPoint: List[List[Union[str, float]]]
     feature: str
-
+    port20MarkPoint: Optional[List[List[Union[str, float]]]] = None
+    port21MarkPoint: Optional[List[List[Union[str, float]]]] = None
+    port22MarkPoint: Optional[List[List[Union[str, float]]]] = None
 
 class HighlightItem(BaseModel):
     """
@@ -66,4 +69,5 @@ class GetTimeSeriesAttackDataResponse(BaseModel):
     data: DataSchema
     highlight: List[List[HighlightItem]]
     partitions: List[PartitionBoundary] = []
+    features: List[str] = []
     current_partition_index: Optional[int] = None
