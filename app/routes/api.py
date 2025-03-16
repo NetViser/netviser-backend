@@ -243,7 +243,7 @@ async def upload_file(
         max_age=43200,  # 12 hours
         httponly=True,
         secure=settings.SECURE_COOKIE,
-        samesite="lax",
+        samesite="none",
     )
 
     try:
