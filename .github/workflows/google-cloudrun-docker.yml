@@ -65,3 +65,11 @@ jobs:
             REDIS_USERNAME=${{ secrets.REDIS_USERNAME }}
             S3_BUCKET_NAME=${{ secrets.S3_BUCKET_NAME }}
             SECURE_COOKIE=${{ secrets.SECURE_COOKIE }}
+
+      - name: Allow Unauthenticated Access
+        run: |
+          gcloud run services add-iam-policy-binding ${{ env.SERVICE }} \
+            --region=${{ env.REGION }} \
+            --project=${{ env.PROJECT_ID }} \
+            --member="allUsers" \
+            --role="roles/run.invoker"
