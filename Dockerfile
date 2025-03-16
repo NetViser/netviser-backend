@@ -21,5 +21,5 @@ COPY ./model /code/model
 # Expose the port (optional, for documentation; Cloud Run ignores this)
 EXPOSE ${PORT}
 
-# Run the application using the PORT environment variable
-CMD ["pdm", "run", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "$PORT"]
+# Run the application using shell form to substitute $PORT
+CMD pdm run uvicorn app.main:app --host 0.0.0.0 --port $PORT
