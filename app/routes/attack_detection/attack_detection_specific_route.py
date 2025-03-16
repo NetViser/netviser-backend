@@ -134,7 +134,7 @@ def build_record(row: dict, field_list: list, protocol_distribution: dict) -> di
     return {key: mapping[key](row) for key in field_list if key in mapping}
 
 
-@router.get("/")
+@router.get("/overview")
 async def get_specific_attack_detection(
     attack_type: str,
     session_id: Optional[str] = Cookie(None),
