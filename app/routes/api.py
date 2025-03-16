@@ -211,12 +211,29 @@ async def upload_file(
       5. Uploading both the raw file and processed CSV to S3 in separate folders.
       6. Storing the S3 key of the processed file in the Redis session.
     """
-    # 1. Validate input file
+    # Determine the maximum upload size (default to 10MB if not defined)
+    MAX_UPLOAD_SIZE = getattr(
+        settings, "MAX_UPLOAD_SIZE", 10 * 1024 * 1024
+    )  # 10MB in bytes
+    print(f"MAX_UPLOAD_SIZE: {MAX_UPLOAD_SIZE}")
 
+    # 1. Validate input file
     print(f"Sample file: {samplefile}")
     if not samplefile:
         if not file:
             raise ValueError("File missing")
+
+        # Check file size before processing
+        file.file.seek(0, 2)  # Move to the end of the file to get size
+        file_size = file.file.tell()
+        file.file.seek(0)  # Reset file pointer to the beginning
+        print(f"File size: {file_size}")
+
+        if file_size > MAX_UPLOAD_SIZE:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File size exceeds the maximum limit of {MAX_UPLOAD_SIZE / (1024 * 1024)} MB.",
+            )
 
     # 2. Create a new session
     session_id = str(uuid.uuid4())
@@ -225,13 +242,12 @@ async def upload_file(
         value=session_id,
         max_age=43200,  # 12 hours
         httponly=True,
-        secure=(False if settings.STAGE == "local" else True),
+        secure=settings.SECURE_COOKIE,
         samesite="lax",
     )
 
     try:
         if not samplefile:
-            file.file.seek(0)
             raw_file = UploadFile(filename=f"{file.filename}", file=file.file)
 
             raw_file_info = await s3_service.upload(
@@ -270,7 +286,7 @@ async def upload_file(
 
             return_msg = "Sample file successfully processed and stored in session."
 
-        # 17. Store or update the session data in Redis with the processed file's S3 key
+        # Store or update the session data in Redis with the processed file's S3 key
         redis_client.set_session_data(
             session_id, model_applied_s3_key, ttl_in_seconds=43200
         )
@@ -342,50 +358,6 @@ async def get_attack_detection_brief_scatter(
 
     except Exception:
         return Response(status_code=400, content="Failed to retrieve data.")
-
-
-@router.post("/raw-file-upload")
-async def raw_file_upload(
-    response: Response,
-    session_id: Optional[str] = Cookie(None),
-    file: UploadFile = File(...),
-    s3_service: S3 = Depends(S3),
-):
-    """
-    Store the raw file in S3
-    """
-    if not file:
-        raise ValueError("file missing")
-
-    if not session_id:
-        # If the user doesn't have a session_id, create a new one
-        session_id = str(uuid.uuid4())
-        response.set_cookie(
-            key=SESSION_COOKIE_NAME,
-            value=session_id,
-            max_age=300,
-            httponly=True,  # Prevents JavaScript access
-            secure=(False if settings.STAGE == "local" else True),
-            samesite="lax",  # Adjust as needed
-        )
-
-    try:
-        # Upload the raw file to S3
-        upload_output = await s3_service.upload(file, file.filename, session_id)
-        s3_key = upload_output.get("s3_key")
-
-        # Store or update the session data in Redis with a 5-minute TTL
-        redis_client.set_session_data(session_id, s3_key, ttl_in_seconds=19960)
-        return {
-            "message": "File successfully stored in session.",
-            "session_id": session_id,
-        }
-
-    except Exception as e:
-        print(e)
-        return {
-            "message": "Failed to process the uploaded file.",
-        }
 
 
 @router.get("/get-file-name")
