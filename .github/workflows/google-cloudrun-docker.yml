@@ -37,7 +37,7 @@ on:
 env:
   PROJECT_ID: 'netviser'
   REGION: 'asia-east1'
-  GAR_NAME: 'netviser'
+  GAR_NAME: 'netviser-gar'
   GAR_LOCATION: 'asia-east1'
   SERVICE: 'netviser-app'
 
