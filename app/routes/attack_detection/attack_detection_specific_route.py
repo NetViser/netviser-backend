@@ -9,9 +9,7 @@ from app.services.s3_service import S3
 from app.services.redis_service import RedisClient
 from app.configs.config import get_settings
 
-router = APIRouter(
-    prefix="/api/attack-detection", tags=["specific attack detection"]
-)
+router = APIRouter(prefix="/api/attack-detection", tags=["specific attack detection"])
 settings = get_settings()
 redis_client = RedisClient()
 
