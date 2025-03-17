@@ -82,32 +82,6 @@ class S3:
         except ClientError as e:
             raise HTTPException(status_code=404, detail="File not found in S3.") from e
 
-    async def generate_presigned_url(
-        self,
-        filename: str,
-        expiration: int = 3600,
-        session_id: Optional[str] = Cookie(None),
-    ) -> str:
-        """Generate a presigned URL for accessing a file in S3."""
-
-        if not session_id:
-            raise HTTPException(status_code=400, detail="Session ID missing")
-
-        file_id = str(uuid.uuid4())
-        s3_key = f"sessions/{session_id}/{file_id}_{filename}"
-
-        try:
-            presigned_url = self.client.generate_presigned_url(
-                "put_object",
-                Params={"Bucket": self.bucket_name, "Key": s3_key},
-                ExpiresIn=expiration,
-            )
-            return presigned_url
-        except ClientError as e:
-            raise HTTPException(
-                status_code=500, detail="Failed to generate presigned URL."
-            ) from e
-
     def get_url(
         self,
         s3_key: str,
@@ -128,6 +102,30 @@ class S3:
         except ClientError as e:
             raise HTTPException(
                 status_code=500, detail="Failed to generate get URL."
+            ) from e
+
+    async def generate_presigned_url(
+        self,
+        file_path: str,
+        expiration: int = 3600,
+        session_id: Optional[str] = Cookie(None),
+    ) -> str:
+        """Generate a presigned URL for uploading a file to S3."""
+        if not session_id:
+            raise HTTPException(status_code=400, detail="Session ID missing")
+
+        s3_key = f"{self.path_prefix}/{session_id}/{file_path}"
+
+        try:
+            presigned_url = self.client.generate_presigned_url(
+                "put_object",
+                Params={"Bucket": self.bucket_name, "Key": s3_key},
+                ExpiresIn=expiration,
+            )
+            return presigned_url
+        except ClientError as e:
+            raise HTTPException(
+                status_code=500, detail="Failed to generate presigned URL."
             ) from e
 
     async def upload(
@@ -184,6 +182,20 @@ class S3:
         except ClientError as e:
             raise HTTPException(
                 status_code=500, detail="Error checking file existence in S3."
+            ) from e
+        
+    async def object_exists(self, s3_key: str) -> bool:
+        """Check if an object exists in the S3 bucket."""
+        try:
+            await asyncio.to_thread(
+                self.client.head_object, Bucket=self.bucket_name, Key=s3_key
+            )
+            return True
+        except ClientError as e:
+            if e.response["Error"]["Code"] == "404":
+                return False
+            raise HTTPException(
+                status_code=500, detail="Error checking object existence in S3."
             ) from e
 
     async def get_unique_filename(self, filename: str) -> str:

@@ -7,6 +7,7 @@ from app.services.redis_service import RedisClient
 from fastapi import (
     APIRouter,
     File,
+    Form,
     Response,
     UploadFile,
     Cookie,
@@ -195,6 +196,142 @@ async def fetch_attack_records(
 
 @router.post("/upload")
 async def upload_file(
+    response: Response,
+    filename: str = Form(...),  # Client sends the filename as form data
+    samplefile: Optional[str] = Form(None),  # Keep support for sample files
+    session_id: Optional[str] = Cookie(None),
+    s3_service: S3 = Depends(S3),
+):
+    """
+    Generate a presigned URL for the client to upload a file directly to S3.
+    Supports sample files as an alternative.
+    """
+    # Create a new session
+    session_id = str(uuid.uuid4())
+    response.set_cookie(
+        key=SESSION_COOKIE_NAME,
+        value=session_id,
+        max_age=43200,  # 12 hours
+        httponly=True,
+        secure=settings.SECURE_COOKIE,
+        samesite=settings.SAMESITE,
+    )
+
+    try:
+        if samplefile:
+            # Handle sample file case (no presigned URL needed)
+            sample_mapping = {
+                "ssh-ftp.csv": "sample/model-applied/ssh-ftp.csv",
+                "ddos-ftp.csv": "sample/model-applied/ddos-ftp.csv",
+                "ftp_patator_occurence.csv": "sample/model-applied/ftp_patator_occurence.csv",
+                "portscan_dos_hulk_slowloris.csv": "sample/model-applied/portscan_dos_hulk_slowloris.csv",
+                "portscan_dos_hulk.csv": "sample/model-applied/portscan_dos_hulk.csv",
+                "portscan.csv": "sample/model-applied/portscan.csv",
+            }
+            model_applied_s3_key = sample_mapping.get(samplefile)
+            if not model_applied_s3_key:
+                raise HTTPException(status_code=400, detail="Invalid sample file name")
+
+            redis_client.set_session_data(
+                session_id, model_applied_s3_key, ttl_in_seconds=43200
+            )
+            return {
+                "completed": True,
+                "message": "Sample file selected and stored in session",
+                "session_id": session_id,
+                "s3_key": model_applied_s3_key,
+            }
+
+        # Handle client-side upload with presigned URL
+        raw_file_path = f"network-file/raw/{filename}"
+        raw_s3_key = f"{s3_service.path_prefix}/{session_id}/{raw_file_path}"
+
+        # Generate presigned URL for raw file upload
+        presigned_url = await s3_service.generate_presigned_url(
+            file_path=raw_file_path,  # Pass the file_path directly
+            expiration=180,  # 3 minutes
+            session_id=session_id,
+        )
+
+        return {
+            "completed": False,
+            "message": "Upload the file to the provided presigned URL",
+            "session_id": session_id,
+            "presigned_url": presigned_url,
+            "raw_file_path": raw_s3_key,  # Full S3 key for the raw file
+        }
+
+    except Exception as e:
+        print(f"Error in upload: {e}")
+        raise HTTPException(status_code=500, detail="Failed to initiate file upload.")
+
+
+@router.post("/upload-complete")
+async def upload_complete(
+    session_id: str = Cookie(...),
+    raw_file_path: str = Form(...),  # Full S3 key from /upload
+    s3_service: S3 = Depends(S3),  # Inject S3 service
+    lambda_service: LambdaService = Depends(LambdaService),
+):
+    """
+    Trigger Lambda processing after the client uploads the file to S3.
+    Checks if raw file exists and generates model_applied_file_path internally.
+    """
+    try:
+        # Step 1: Check if the raw file exists in S3
+        file_exists = await s3_service.object_exists(s3_key=raw_file_path)
+        if not file_exists:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Raw file not found in S3 at path: {raw_file_path}",
+            )
+
+        # Step 2: Generate a unique model_applied_file_path
+        raw_filename = raw_file_path.split("/")[-1]  # Extract filename from path
+        model_applied_file_path = "network-file/model-applied/" + raw_filename
+        model_applied_s3_key = (
+            f"{s3_service.path_prefix}/{session_id}/{model_applied_file_path}"
+        )
+
+        # Step 3: Prepare Lambda payload
+        lambda_service_payload = {
+            "data": {
+                "raw_file_path": raw_file_path,
+                "model_applied_file_path": model_applied_s3_key,
+            }
+        }
+
+        # Step 4: Invoke Lambda function for processing
+        lambda_inference_output = await lambda_service.invoke_function(
+            function_name="inference_func",
+            function_params=lambda_service_payload,
+        )
+
+        # Step 5: Get the S3 key of the processed file from Lambda response
+        model_applied_s3_key = lambda_inference_output.get("file_key")
+        if not model_applied_s3_key:
+            raise HTTPException(
+                status_code=500, detail="Lambda did not return a valid file key"
+            )
+
+        # Step 6: Update session data in Redis with the processed file key
+        redis_client.set_session_data(
+            session_id, model_applied_s3_key, ttl_in_seconds=43200
+        )
+
+        return {
+            "message": "File processed successfully",
+            "session_id": session_id,
+            "s3_key": model_applied_s3_key,
+        }
+
+    except Exception as e:
+        print(f"Error processing file: {e}")
+        raise HTTPException(status_code=500, detail="Failed to process uploaded file.")
+
+
+@router.post("/upload-legacy")
+async def upload_file_legacy(
     response: Response,
     session_id: Optional[str] = Cookie(None),
     file: Optional[UploadFile] = File(None),
