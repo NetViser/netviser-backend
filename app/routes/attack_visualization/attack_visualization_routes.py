@@ -4,7 +4,7 @@ from typing import Optional, Dict, Callable, List, Union
 import pandas as pd
 import io
 
-from app.schemas.attack_visualization import GetTimeSeriesAttackDataResponse
+from app.schemas.time_series import GetTimeSeriesAttackDataResponse
 from app.services.s3_service import S3
 from app.services.redis_service import RedisClient
 from app.configs.config import get_settings
