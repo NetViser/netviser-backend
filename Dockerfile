@@ -26,4 +26,4 @@ ENV PATH="/code/.venv/bin:$PATH"
 EXPOSE ${PORT}
 
 # Run Gunicorn with shell form
-CMD gunicorn -k uvicorn.workers.UvicornWorker -b 0.0.0.0:$PORT --workers 4 app.main:app
+CMD gunicorn -k uvicorn.workers.UvicornWorker -b 0.0.0.0:$PORT --workers 4 --timeout 120 app.main:app
