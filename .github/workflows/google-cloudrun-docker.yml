@@ -48,7 +48,7 @@ jobs:
             --project ${{ env.PROJECT_ID }} \
             --cpu 4 \
             --max-instances 2 \
-            --memory 12Gi \
+            --memory 8Gi \
             --platform managed \
             --set-env-vars "AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }},AWS_REGION=${{ secrets.AWS_REGION }},AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }},GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }},GEMINI_MODEL=${{ secrets.GEMINI_MODEL }},LAMBDA_INFERENCE_FUNCTION_NAME=${{ secrets.LAMBDA_INFERENCE_FUNCTION_NAME }},MAX_UPLOAD_SIZE=${{ secrets.MAX_UPLOAD_SIZE }},REDIS_HOST=${{ secrets.REDIS_HOST }},REDIS_PASSWORD=${{ secrets.REDIS_PASSWORD }},REDIS_PORT=${{ secrets.REDIS_PORT }},REDIS_USERNAME=${{ secrets.REDIS_USERNAME }},S3_BUCKET_NAME=${{ secrets.S3_BUCKET_NAME }},ENV=${{ secrets.ENV }}"
 
