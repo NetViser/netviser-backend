@@ -348,46 +348,30 @@ async def get_attack_detection_xai_summary(
     """
     Retrieve or generate a SHAP bar-summary CSV for the specified attack_type
     and session_id from S3. If the CSV does not exist, compute and upload it.
-    The heavy computation is offloaded to a worker thread to improve concurrency.
+    Optimized for performance by subsampling early and streamlining computations.
     """
     # Validate session_id
     if not session_id:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail="Session ID missing"
-        )
+        raise HTTPException(status_code=400, detail="Session ID missing")
 
     # Retrieve session data from Redis
     try:
         session_data = redis_client.get_session_data(session_id)
         if not session_data:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Session expired or not found",
-            )
+            raise HTTPException(status_code=400, detail="Session expired or not found")
     except Exception:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Error retrieving session data",
-        )
+        raise HTTPException(status_code=400, detail="Error retrieving session data")
 
-    # Check if both CSVs exist in S3. If yes, return them directly.
+    # Check if CSVs exist in S3
     base_key = f"xai/{attack_type}/summary"
     bar_summary_key = f"{base_key}/bar_summary/value.csv"
     beeswarm_summary_key = f"{base_key}/beeswarm_summary/value.csv"
     try:
-        bar_csv_exists = await s3_service.file_exists(
-            filename=bar_summary_key, session_id=session_id
-        )
-        beeswarm_csv_exists = await s3_service.file_exists(
-            filename=beeswarm_summary_key, session_id=session_id
-        )
+        bar_csv_exists = await s3_service.file_exists(filename=bar_summary_key, session_id=session_id)
+        beeswarm_csv_exists = await s3_service.file_exists(filename=beeswarm_summary_key, session_id=session_id)
         if bar_csv_exists and beeswarm_csv_exists:
-            bar_summary_data = await s3_service.read(
-                f"uploads/{session_id}/{bar_summary_key}"
-            )
-            beeswarm_summary_data = await s3_service.read(
-                f"uploads/{session_id}/{beeswarm_summary_key}"
-            )
+            bar_summary_data = await s3_service.read(f"uploads/{session_id}/{bar_summary_key}")
+            beeswarm_summary_data = await s3_service.read(f"uploads/{session_id}/{beeswarm_summary_key}")
             bar_summary_df = pd.read_csv(io.BytesIO(bar_summary_data))
             beeswarm_summary_df = pd.read_csv(io.BytesIO(beeswarm_summary_data))
             return {
@@ -395,179 +379,91 @@ async def get_attack_detection_xai_summary(
                 "beeswarm_summary": beeswarm_summary_df.to_dict(orient="records"),
             }
     except Exception:
-        # If reading from S3 fails, proceed to recompute.
-        pass
+        pass  # Proceed to recompute if S3 read fails
 
-    try:
-        # Retrieve file data from S3 using session data.
-        session_data = redis_client.get_session_data(session_id)
-        if not session_data:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Session expired or not found",
-            )
-        file_data = await s3_service.read(session_data)
+    # Retrieve file data from S3
+    file_data = await s3_service.read(session_data)
 
-        # Define a helper function for heavy (CPU-bound) computations.
-        def compute_xai_summary(file_data: bytes, attack_type: str):
-            # Load dataset and reset the index.
-            file_like_object = io.BytesIO(file_data)
-            df = pd.read_csv(
-                file_like_object, engine="pyarrow", dtype_backend="pyarrow"
-            )
-            df.reset_index(drop=True, inplace=True)
+    def compute_xai_summary(file_data: bytes, attack_type: str, max_samples: int = 10000):
+        # Load dataset and subsample early
+        df = pd.read_csv(io.BytesIO(file_data), engine="pyarrow", dtype_backend="pyarrow")
+        if len(df) > max_samples:
+            df = df.sample(n=max_samples, random_state=42)  # Subsample early
+        df.reset_index(drop=True, inplace=True)
 
-            # Load model artifacts.
-            model = xgb.Booster()
-            model_path = os.path.join("model", "xgb_booster.model")
-            scaler_path = os.path.join("model", "scaler.pkl")
-            label_enc_path = os.path.join("model", "label_encoder.pkl")
-            model.load_model(model_path)
-            scaler = joblib.load(scaler_path)
-            label_encoder = joblib.load(label_enc_path)
+        # Load model artifacts
+        model = xgb.Booster()
+        model.load_model(os.path.join("model", "xgb_booster.model"))
+        scaler = joblib.load(os.path.join("model", "scaler.pkl"))
+        label_encoder = joblib.load(os.path.join("model", "label_encoder.pkl"))
 
-            explainer = shap.TreeExplainer(model)
+        # Prepare features
+        feature_cols = [
+            "Src Port", "Dst Port", "Total TCP Flow Time", "Bwd Init Win Bytes",
+            "Bwd Packet Length Std", "Total Length of Fwd Packet", "Fwd Packet Length Max",
+            "Bwd IAT Mean", "Flow IAT Min", "Fwd PSH Flags",
+        ]
+        X = df[feature_cols]
+        X_scaled = scaler.transform(X)
+        X_scaled_df = pd.DataFrame(X_scaled, columns=feature_cols)
 
-            # Prepare features & compute SHAP.
-            feature_cols = [
-                "Src Port",
-                "Dst Port",
-                "Total TCP Flow Time",
-                "Bwd Init Win Bytes",
-                "Bwd Packet Length Std",
-                "Total Length of Fwd Packet",
-                "Fwd Packet Length Max",
-                "Bwd IAT Mean",
-                "Flow IAT Min",
-                "Fwd PSH Flags",
-            ]
-            X = df[feature_cols]
-            X_scaled = scaler.transform(X)
-            X_scaled_df = pd.DataFrame(X_scaled, columns=feature_cols)
+        # Compute SHAP values on subsampled data
+        explainer = shap.TreeExplainer(model)
+        shap_values = explainer.shap_values(X_scaled_df)
 
-            shap_values = explainer.shap_values(X_scaled_df)
+        try:
+            attack_class_index = label_encoder.transform([attack_type])[0]
+        except ValueError:
+            raise ValueError(f"'{attack_type}' not recognized in model classes.")
+        shap_values_attack_class = shap_values[..., attack_class_index]
 
-            try:
-                attack_class_index = label_encoder.transform([attack_type])[0]
-            except ValueError:
-                raise ValueError(f"'{attack_type}' not recognized in model classes.")
+        # Bar summary (optimized)
+        mean_abs_shap_values = np.mean(np.abs(shap_values_attack_class), axis=0)
+        sorted_idx = np.argsort(mean_abs_shap_values)[::-1]  # Descending order
+        bar_summary_df = pd.DataFrame({
+            "feature": [feature_cols[i] for i in sorted_idx],
+            "mean_abs_shap": mean_abs_shap_values[sorted_idx],
+        })
 
-            shap_values_attack_class = shap_values[..., attack_class_index]
-
-            # Compute bar summary.
-            mean_abs_shap_values = np.mean(np.abs(shap_values_attack_class), axis=0)
-            sorted_idx = np.argsort(mean_abs_shap_values)
-            sorted_features_desc = [feature_cols[i] for i in sorted_idx[::-1]]
-            sorted_importances_desc = mean_abs_shap_values[sorted_idx[::-1]]
-            bar_summary_df = pd.DataFrame(
-                {
-                    "feature": sorted_features_desc,
-                    "mean_abs_shap": sorted_importances_desc,
-                }
-            )
-
-            # Compute beeswarm summary.
-            shap_df = pd.DataFrame(
-                shap_values_attack_class, columns=X_scaled_df.columns
-            )
-            shap_df["index"] = shap_df.index
-            shap_df = shap_df.melt(
-                id_vars=["index"], var_name="feature", value_name="shap_value"
-            )
-            # Melt the scaled feature values (for color mapping).
-            feature_vals = X_scaled_df.melt(ignore_index=False).reset_index()
-            feature_vals.columns = ["index", "feature", "feature_value"]
-            melted_df = shap_df.merge(feature_vals, on=["index", "feature"])
-            # Melt the original feature values (for hover display).
-            orig_vals = X.melt(ignore_index=False).reset_index()
-            orig_vals.columns = ["index", "feature", "original_feature_value"]
-            melted_df = melted_df.merge(orig_vals, on=["index", "feature"])
-            # Compute normalized feature values.
-            melted_df["normalized_feature_value"] = melted_df.groupby("feature")[
-                "feature_value"
-            ].transform(normalize_feature)
-            # Order features by average absolute SHAP value.
-            feature_order = (
-                melted_df.groupby("feature")["shap_value"]
-                .apply(lambda x: np.mean(np.abs(x)))
-                .sort_values(ascending=True)
-                .index.tolist()
-            )
-            feature_mapping = {feature: i for i, feature in enumerate(feature_order)}
-            # Compute per-feature jitter.
-            np.random.seed(42)
-            melted_df["jitter_offset"] = melted_df.groupby("feature")[
-                "shap_value"
-            ].transform(
-                lambda s: pd.Series(
-                    compute_beeswarm_jitter(s.values, row_height=0.4), index=s.index
-                )
-            )
-            melted_df["y_jitter"] = (
-                melted_df["feature"].map(feature_mapping) + melted_df["jitter_offset"]
-            )
-            melted_df.drop(
-                columns=["feature_value", "jitter_offset", "index"], inplace=True
-            )
-
-            beeswarm_summary_df = melted_df.copy()
-            # --- Sampling Step: Limit to 1000 records, with equal sampling per feature.
-            if len(beeswarm_summary_df) > 1000:
-                unique_features = beeswarm_summary_df["feature"].unique()
-                records_per_feature = 1000 // len(unique_features)
-                sampled_dfs = []
-                for feat in unique_features:
-                    feat_df = beeswarm_summary_df[
-                        beeswarm_summary_df["feature"] == feat
-                    ]
-                    if len(feat_df) > records_per_feature:
-                        feat_sample = feat_df.sample(
-                            n=records_per_feature, random_state=42
-                        )
-                    else:
-                        feat_sample = feat_df
-                    sampled_dfs.append(feat_sample)
-                beeswarm_summary_df = pd.concat(sampled_dfs).reset_index(drop=True)
-            # --- End Sampling Step
-
-            return bar_summary_df, beeswarm_summary_df
-
-        # Offload the heavy computation to a worker thread.
-        bar_summary_df, beeswarm_summary_df = await asyncio.to_thread(
-            compute_xai_summary, file_data, attack_type
+        # Beeswarm summary (optimized)
+        shap_df = pd.DataFrame(shap_values_attack_class, columns=feature_cols)
+        melted_df = shap_df.melt(var_name="feature", value_name="shap_value")
+        melted_df["original_feature_value"] = X.melt()["value"]  # Align original values
+        melted_df["normalized_feature_value"] = (
+            melted_df.groupby("feature")["original_feature_value"]
+            .transform(lambda x: (x - x.min()) / (x.max() - x.min()) if x.max() != x.min() else 0)
         )
 
-        # Upload the bar summary CSV to S3.
-        bar_summary_csv_buffer = io.BytesIO()
-        bar_summary_df.to_csv(bar_summary_csv_buffer, index=False)
-        bar_summary_csv_buffer.seek(0)
-        await s3_service.upload(
-            file=UploadFile(file=bar_summary_csv_buffer),
-            file_path=bar_summary_key,
-            session_id=session_id,
+        # Compute feature order and jitter efficiently
+        feature_order = (
+            melted_df.groupby("feature")["shap_value"]
+            .apply(lambda x: np.mean(np.abs(x)))
+            .sort_values()
+            .index.tolist()
         )
+        feature_mapping = {f: i for i, f in enumerate(feature_order)}
+        melted_df["y_jitter"] = melted_df["feature"].map(feature_mapping)
+        np.random.seed(42)
+        melted_df["y_jitter"] += np.random.uniform(-0.4, 0.4, size=len(melted_df))  # Simplified jitter
 
-        # Upload the beeswarm summary CSV to S3.
-        beeswarm_summary_csv_buffer = io.BytesIO()
-        beeswarm_summary_df.to_csv(beeswarm_summary_csv_buffer, index=False)
-        beeswarm_summary_csv_buffer.seek(0)
-        await s3_service.upload(
-            file=UploadFile(file=beeswarm_summary_csv_buffer),
-            file_path=beeswarm_summary_key,
-            session_id=session_id,
-        )
+        beeswarm_summary_df = melted_df[["feature", "shap_value", "original_feature_value", "normalized_feature_value", "y_jitter"]]
 
-        return {
-            "bar_summary": bar_summary_df.to_dict(orient="records"),
-            "beeswarm_summary": beeswarm_summary_df.to_dict(orient="records"),
-        }
+        return bar_summary_df, beeswarm_summary_df
 
-    except Exception as e:
-        print("ERROR", e)
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Failed to retrieve or process data.",
-        )
+    # Offload computation and execute
+    bar_summary_df, beeswarm_summary_df = await asyncio.to_thread(compute_xai_summary, file_data, attack_type)
+
+    # Upload to S3
+    for df, key in [(bar_summary_df, bar_summary_key), (beeswarm_summary_df, beeswarm_summary_key)]:
+        csv_buffer = io.BytesIO()
+        df.to_csv(csv_buffer, index=False)
+        csv_buffer.seek(0)
+        await s3_service.upload(file=UploadFile(file=csv_buffer), file_path=key, session_id=session_id)
+
+    return {
+        "bar_summary": bar_summary_df.to_dict(orient="records"),
+        "beeswarm_summary": beeswarm_summary_df.to_dict(orient="records"),
+    }
 
 
 @router.get("/summary/bar/explanation")
