@@ -19,8 +19,11 @@ RUN python -m pip install --upgrade pip --no-cache-dir && \
 COPY ./app /code/app
 COPY ./model /code/model
 
+# Set PATH to include PDM's virtual environment
+ENV PATH="/code/.venv/bin:$PATH"
+
 # Expose the port (optional, for documentation)
 EXPOSE ${PORT}
 
-# Run Gunicorn with Uvicorn workers in exec form
-CMD ["gunicorn", "-k", "uvicorn.workers.UvicornWorker", "-b", "0.0.0.0:$PORT", "--workers", "4", "app.main:app"]
+# Run Gunicorn with shell form
+CMD gunicorn -k uvicorn.workers.UvicornWorker -b 0.0.0.0:$PORT --workers 4 app.main:app
