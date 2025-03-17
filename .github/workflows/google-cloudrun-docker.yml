@@ -46,7 +46,7 @@ jobs:
             --image "${{ env.GAR_LOCATION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.GAR_NAME }}/${{ env.SERVICE }}:${{ github.sha }}" \
             --region ${{ env.REGION }} \
             --project ${{ env.PROJECT_ID }} \
-            --cpu 4 \
+            --cpu 8 \
             --max-instances 1 \
             --memory 16Gi \
             --platform managed \
