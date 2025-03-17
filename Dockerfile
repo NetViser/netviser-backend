@@ -1,4 +1,4 @@
-# Use the official Python 3.9.6 slim image (Debian-based slim version)
+# Use the official Python 3.9.6 slim image
 FROM python:3.9.6-slim-buster
 
 # PDM version
@@ -9,17 +9,18 @@ ENV PORT=8080
 
 WORKDIR /code
 
-# Copy only dependency management files to leverage Docker caching
+# Copy dependency files
 COPY pdm.lock pyproject.toml ./
-RUN python -m pip install --upgrade pip
-RUN pip install pdm==${PDM_VERSION} && pdm install --prod --no-lock --no-editable
+RUN python -m pip install --upgrade pip --no-cache-dir && \
+    pip install pdm==${PDM_VERSION} --no-cache-dir && \
+    pdm install --prod --no-lock --no-editable
 
-# Copy the rest of the files
+# Copy application files
 COPY ./app /code/app
 COPY ./model /code/model
 
-# Expose the port (optional, for documentation; Cloud Run ignores this)
+# Expose the port (optional, for documentation)
 EXPOSE ${PORT}
 
-# Run the application using shell form to substitute $PORT
-CMD pdm run uvicorn app.main:app --host 0.0.0.0 --port $PORT
+# Run Gunicorn with Uvicorn workers in exec form
+CMD ["gunicorn", "-k", "uvicorn.workers.UvicornWorker", "-b", "0.0.0.0:$PORT", "--workers", "4", "app.main:app"]

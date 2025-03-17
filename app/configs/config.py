@@ -17,10 +17,24 @@ class Settings(BaseSettings):
     GEMINI_MODEL: Optional[str] = None
     LAMBDA_INFERENCE_FUNCTION_NAME: Optional[str] = None
 
-    SECURE_COOKIE: Optional[bool] = False
     MAX_UPLOAD_SIZE: Optional[int] = None
+    ENV: Optional[str] = None
+    
+    # New properties in uppercase with default values
+    SECURE_COOKIE: bool = False
+    SAMESITE: str = 'lax'
 
     model_config = SettingsConfigDict(env_file=".env")
+
+    def __init__(self, **values):
+        super().__init__(**values)
+        # Set SECURE_COOKIE and SAMESITE based on ENV
+        if self.ENV == "production":
+            self.SECURE_COOKIE = True
+            self.SAMESITE = "none"
+        elif self.ENV == "local":
+            self.SECURE_COOKIE = False
+            self.SAMESITE = "lax"
 
 
 def get_settings() -> Settings:
