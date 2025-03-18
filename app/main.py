@@ -17,10 +17,7 @@ app.include_router(xai_router)
 app.include_router(attack_visualization_router)
 app.include_router(attack_detection_specific_router)
 
-origins = [
-    "http://localhost:3000",  # Change to your client's origin
-    "http://127.0.0.1:3000"
-]
+origins = ["*"]
 
 # Add CORS middleware
 app.add_middleware(
