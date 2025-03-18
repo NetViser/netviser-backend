@@ -6,7 +6,7 @@ on:
       - 'main'
 
 env:
-  PROJECT_ID: 'netviser'
+  PROJECT_ID: 'netviser-454113'
   REGION: 'asia-east1'
   GAR_NAME: 'netviser-gar'
   GAR_LOCATION: 'asia-east1'
