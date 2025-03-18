@@ -454,10 +454,56 @@ async def get_attack_detection_xai_summary(
         X_scaled = scaler.transform(X)
         X_scaled_df = pd.DataFrame(X_scaled, columns=feature_cols)
 
-        # Sample the data to a maximum of 10,000 rows before computing SHAP
+        # Sample the data to a maximum of 30,000 rows before computing SHAP,
+        # aiming for 70% of the sample to match the requested attack_type
         MAX_BEESWARM_ROWS = 20_000
         if len(X_scaled_df) > MAX_BEESWARM_ROWS:
-            X_scaled_df = X_scaled_df.sample(n=MAX_BEESWARM_ROWS, random_state=42)
+            # Get the original labels from the dataset
+            y = df["Label"]  # Assuming "Label" is the column with attack types
+            # Convert attack_type to the encoded form if needed
+            try:
+                attack_class_encoded = label_encoder.transform([attack_type])[0]
+            except ValueError:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"'{attack_type}' not recognized in model classes.",
+                )
+
+            # Filter rows where the label matches the attack_type
+            matching_mask = y == attack_type  # Use original label if not encoded in df
+            # If labels in df are encoded, use: matching_mask = y == attack_class_encoded
+            matching_rows = X_scaled_df[matching_mask]
+            non_matching_rows = X_scaled_df[~matching_mask]
+
+            # Calculate target number of matching and non-matching rows
+            target_matching = int(MAX_BEESWARM_ROWS * 0.7)  # 70% of the total
+            target_non_matching = MAX_BEESWARM_ROWS - target_matching  # 30% of the total
+            num_matching = len(matching_rows)
+
+            if num_matching >= target_matching:
+                # If we have enough matching rows, take 70% from matching and 30% from non-matching
+                matching_sample = matching_rows.sample(n=target_matching, random_state=42)
+                if len(non_matching_rows) >= target_non_matching:
+                    non_matching_sample = non_matching_rows.sample(
+                        n=target_non_matching, random_state=42
+                    )
+                else:
+                    # If not enough non-matching rows, take all available
+                    non_matching_sample = non_matching_rows
+                X_scaled_df = pd.concat([matching_sample, non_matching_sample])
+            else:
+                # If we don't have enough matching rows, take all available matching rows
+                # and fill the rest with non-matching rows up to MAX_BEESWARM_ROWS
+                matching_sample = matching_rows
+                remaining_needed = MAX_BEESWARM_ROWS - len(matching_sample)
+                if len(non_matching_rows) >= remaining_needed:
+                    non_matching_sample = non_matching_rows.sample(
+                        n=remaining_needed, random_state=42
+                    )
+                else:
+                    # If not enough non-matching rows, take all available
+                    non_matching_sample = non_matching_rows
+                X_scaled_df = pd.concat([matching_sample, non_matching_sample])
 
         shap_values = explainer.shap_values(X_scaled_df)
         print("shap_values\n", shap_values[0])
@@ -477,11 +523,8 @@ async def get_attack_detection_xai_summary(
 
         # Compute csv data for bar summary
         mean_abs_shap_values = np.mean(np.abs(shap_values_attack_class), axis=0)
-        print("after mean_abs_shap_values")
         sorted_idx = np.argsort(mean_abs_shap_values)
-        print("after sorted_idx")
         sorted_features_desc = [feature_cols[i] for i in sorted_idx[::-1]]
-        print("after sorted_features_desc")
         sorted_importances_desc = mean_abs_shap_values[sorted_idx[::-1]]
 
         # Create DataFrame & upload to S3
