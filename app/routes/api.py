@@ -197,8 +197,8 @@ async def fetch_attack_records(
 @router.post("/upload")
 async def upload_file(
     response: Response,
-    filename: str = Form(...),  # Client sends the filename as form data
-    samplefile: Optional[str] = Form(None),  # Keep support for sample files
+    filename: Optional[str] = Form(None),
+    sample_filename: Optional[str] = Form(None),  # Keep support for sample files
     session_id: Optional[str] = Cookie(None),
     s3_service: S3 = Depends(S3),
 ):
@@ -218,7 +218,7 @@ async def upload_file(
     )
 
     try:
-        if samplefile:
+        if sample_filename:
             # Handle sample file case (no presigned URL needed)
             sample_mapping = {
                 "ssh-ftp.csv": "sample/model-applied/ssh-ftp.csv",
@@ -228,7 +228,7 @@ async def upload_file(
                 "portscan_dos_hulk.csv": "sample/model-applied/portscan_dos_hulk.csv",
                 "portscan.csv": "sample/model-applied/portscan.csv",
             }
-            model_applied_s3_key = sample_mapping.get(samplefile)
+            model_applied_s3_key = sample_mapping.get(sample_filename)
             if not model_applied_s3_key:
                 raise HTTPException(status_code=400, detail="Invalid sample file name")
 
