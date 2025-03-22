@@ -6,6 +6,8 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from google.oauth2 import service_account
 from google.cloud import storage
+from google.auth import default
+from google.auth.transport import requests
 
 import logging
 
@@ -37,17 +39,63 @@ class GCS:
         self.bucket_name = bucket_name
         self.path_prefix = "uploads"
 
-        credentials_path = settings.GCS_CREDENTIALS_JSON_PATH
-        if credentials_path and os.path.exists(credentials_path):
-            logger.info(f"Using service account credentials from file: {credentials_path}")
-            credentials = service_account.Credentials.from_service_account_file(credentials_path)
-            self.client = storage.Client(credentials=credentials, project=settings.GC_PROJECT_ID)
+        if settings.ENV == "local" and hasattr(settings, "GCS_CREDENTIALS_JSON_PATH"):
+            credentials_path = settings.GCS_CREDENTIALS_JSON_PATH
+            if credentials_path and os.path.exists(credentials_path):
+                logger.info(f"Local env detected. Using service account credentials from file: {credentials_path}")
+                credentials = service_account.Credentials.from_service_account_file(
+                    credentials_path,
+                    scopes=["https://www.googleapis.com/auth/cloud-platform"]
+                )
+                self.client = storage.Client(credentials=credentials, project=settings.GC_PROJECT_ID)
+                self.use_adc = False  # Flag to indicate we're not using ADC
+            else:
+                raise ValueError(f"Local env detected but credentials file not found at: {credentials_path}")
         else:
-            logger.info("Using ADC (Application Default Credentials)")
-            self.client = storage.Client(project=settings.GC_PROJECT_ID)
+            # Non-local env (e.g., Cloud Run) - use ADC with token signing
+            logger.info("Non-local env detected. Using ADC with token signing workaround")
+            credentials, project_id = default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+            if credentials.token is None:
+                logger.info("Refreshing credentials to obtain access token")
+                auth_request = requests.Request()
+                credentials.refresh(auth_request)
+
+            self.credentials = credentials
+            self.service_account_email = getattr(credentials, "service_account_email", None)
+            if not self.service_account_email:
+                raise ValueError("Service account email not found in credentials")
+            self.client = storage.Client(credentials=credentials, project=settings.GC_PROJECT_ID)
+            self.use_adc = True  # Flag to indicate we're using ADC
 
         self.bucket = self.client.bucket(bucket_name)
         logger.info(f"GCS Client initialized for bucket: {bucket_name}")
+
+    async def generate_presigned_url(self, file_path: str, expiration: int = 3600, session_id: Optional[str] = Cookie(None)) -> str:
+        if not session_id:
+            raise HTTPException(status_code=400, detail="Session ID missing")
+
+        gcs_key = f"{self.path_prefix}/{session_id}/{file_path}"
+
+        try:
+            logger.info(f"Generating signed PUT URL for: {gcs_key}")
+            blob = self.bucket.blob(gcs_key)
+            if self.use_adc:
+                # Cloud Run workaround using ADC with service_account_email and access_token
+                url = blob.generate_signed_url(
+                    expiration=expiration,
+                    method="PUT",
+                    version="v4",
+                    service_account_email=self.service_account_email,
+                    access_token=self.credentials.token,
+                )
+            else:
+                # Local env with service account key
+                url = blob.generate_signed_url(expiration=expiration, method="PUT", version="v4")
+            logger.info(f"Generated presigned URL: {url}")
+            return url
+        except Exception as e:
+            logger.error(f"Failed to generate signed PUT URL: {e}")
+            raise HTTPException(status_code=500, detail="Failed to generate presigned URL.") from e
 
     async def read(self, gcs_key: str) -> bytes:
         buffer = BytesIO()
@@ -66,27 +114,20 @@ class GCS:
             full_key = f"{self.path_prefix}/{session_id}/{gcs_key}"
             logger.info(f"Generating signed GET URL for: {full_key}")
             blob = self.bucket.blob(full_key)
-            url = blob.generate_signed_url(expiration=expiration, method="GET", version="v4")
+            if self.use_adc:
+                url = blob.generate_signed_url(
+                    expiration=expiration,
+                    method="GET",
+                    version="v4",
+                    service_account_email=self.service_account_email,
+                    access_token=self.credentials.token
+                )
+            else:
+                url = blob.generate_signed_url(expiration=expiration, method="GET", version="v4")
             return url
         except Exception as e:
             logger.error(f"Failed to generate signed GET URL: {e}")
             raise HTTPException(status_code=500, detail="Failed to generate get URL.") from e
-
-    async def generate_presigned_url(self, file_path: str, expiration: int = 3600, session_id: Optional[str] = Cookie(None)) -> str:
-        if not session_id:
-            raise HTTPException(status_code=400, detail="Session ID missing")
-
-        gcs_key = f"{self.path_prefix}/{session_id}/{file_path}"
-
-        try:
-            logger.info(f"Generating signed PUT URL for: {gcs_key}")
-            blob = self.bucket.blob(gcs_key)
-            url = blob.generate_signed_url(expiration=expiration, method="PUT", version="v4")
-            logger.info(f"Generated presigned URL: {url}")
-            return url
-        except Exception as e:
-            logger.error(f"Failed to generate signed PUT URL: {e}")
-            raise HTTPException(status_code=500, detail="Failed to generate presigned URL.") from e
 
     async def upload(self, file: UploadFile, file_path: str, session_id: Optional[str] = Cookie(None), extra_args: dict = {}) -> Dict[str, Any]:
         if not session_id:

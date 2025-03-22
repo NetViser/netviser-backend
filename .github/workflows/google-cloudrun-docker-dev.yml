@@ -12,7 +12,7 @@ env:
   GAR_LOCATION: 'asia-east1'
   SERVICE: 'netviser-app-dev'
   GCS_BUCKET_NAME: 'netviser-bucket'
-  
+
 jobs:
   deploy:
     runs-on: 'ubuntu-latest'
@@ -40,7 +40,6 @@ jobs:
           docker build --tag "${DOCKER_TAG}" .
           docker push "${DOCKER_TAG}"
 
-      # Deploy to Cloud Run with custom CPU and memory settings using gcloud
       - name: Deploy to Cloud Run
         run: |
           gcloud run deploy ${{ env.SERVICE }} \
@@ -51,6 +50,7 @@ jobs:
             --max-instances 1 \
             --memory 16Gi \
             --platform managed \
+            --service-account "netviser-storage@${{ env.GC_PROJECT_ID }}.iam.gserviceaccount.com" \
             --set-env-vars "GC_PROJECT_ID=${{ env.GC_PROJECT_ID }},GCS_BUCKET_NAME=${{ env.GCS_BUCKET_NAME }},GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }},GEMINI_MODEL=${{ secrets.GEMINI_MODEL }},MAX_UPLOAD_SIZE=${{ secrets.MAX_UPLOAD_SIZE }},REDIS_HOST=${{ secrets.REDIS_HOST }},REDIS_PASSWORD=${{ secrets.REDIS_PASSWORD }},REDIS_PORT=${{ secrets.REDIS_PORT }},REDIS_USERNAME=${{ secrets.REDIS_USERNAME }},ENV=${{ secrets.ENV }}"
 
       - name: Allow Unauthenticated Access
