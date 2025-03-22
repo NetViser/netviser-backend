@@ -2,7 +2,7 @@ from collections import Counter
 import io
 import uuid
 import pandas as pd
-
+import logging
 from app.services.model_service import get_model_artifacts, predict_df
 from app.services.redis_service import RedisClient
 from fastapi import (
@@ -26,6 +26,14 @@ from app.services.model_service import (
     predict_df,
     get_model_artifacts,
 )
+
+# Configure logging
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[logging.StreamHandler()],
+)
+logger = logging.getLogger(__name__)
 
 
 router = APIRouter(prefix="/api", tags=["api"])
@@ -205,7 +213,7 @@ async def fetch_attack_records(
 async def upload_file(
     response: Response,
     filename: Optional[str] = Form(None),
-    sample_filename: Optional[str] = Form(None),  # Keep support for sample files
+    sample_filename: Optional[str] = Form(None),
     session_id: Optional[str] = Cookie(None),
     bucket_service: GCS = Depends(GCS),
 ):
@@ -213,20 +221,29 @@ async def upload_file(
     Generate a presigned URL for the client to upload a file directly to GCS.
     Supports sample files as an alternative.
     """
-    # Create a new session
-    session_id = str(uuid.uuid4())
-    response.set_cookie(
-        key=SESSION_COOKIE_NAME,
-        value=session_id,
-        max_age=43200,  # 12 hours
-        httponly=True,
-        secure=settings.SECURE_COOKIE,
-        samesite=settings.SAMESITE,
+    logger.debug("Entering /upload endpoint")
+    logger.info(
+        f"Received request with filename: {filename}, sample_filename: {sample_filename}, session_id: {session_id}"
     )
 
+    # Create a new session
+    session_id = str(uuid.uuid4())
+    logger.debug(f"Generated new session_id: {session_id}")
+
     try:
+        logger.info("Setting session cookie")
+        response.set_cookie(
+            key=SESSION_COOKIE_NAME,
+            value=session_id,
+            max_age=43200,
+            httponly=True,
+            secure=settings.SECURE_COOKIE,
+            samesite=settings.SAMESITE,
+        )
+        logger.debug("Session cookie set successfully")
+
         if sample_filename:
-            # Handle sample file case (no presigned URL needed)
+            logger.info(f"Processing sample file: {sample_filename}")
             sample_mapping = {
                 "ssh-ftp.csv": "sample/model-applied/ssh-ftp.csv",
                 "ddos-ftp.csv": "sample/model-applied/ddos-ftp.csv",
@@ -235,41 +252,62 @@ async def upload_file(
                 "portscan_dos_hulk.csv": "sample/model-applied/portscan_dos_hulk.csv",
                 "portscan.csv": "sample/model-applied/portscan.csv",
             }
+
             model_applied_gcs_key = sample_mapping.get(sample_filename)
             if not model_applied_gcs_key:
+                logger.warning(f"Invalid sample file name: {sample_filename}")
                 raise HTTPException(status_code=400, detail="Invalid sample file name")
 
+            logger.debug(f"Mapping found: {model_applied_gcs_key}")
+            logger.info(f"Setting Redis session data for sample file")
             redis_client.set_session_data(
                 session_id, model_applied_gcs_key, ttl_in_seconds=43200
             )
-            return {
+            logger.debug("Redis session data set successfully")
+
+            response_data = {
                 "completed": True,
                 "message": "Sample file selected and stored in session",
                 "session_id": session_id,
                 "bucket_key": model_applied_gcs_key,
             }
+            logger.info(f"Returning successful sample file response: {response_data}")
+            return response_data
 
         # Handle client-side upload with presigned URL
+        logger.info("Processing regular file upload")
+        if not filename:
+            logger.warning("No filename provided for regular upload")
+            raise HTTPException(status_code=400, detail="Filename required for upload")
+
         raw_file_path = f"network-file/raw/{filename}"
         raw_gcs_key = f"{bucket_service.path_prefix}/{session_id}/{raw_file_path}"
+        logger.debug(f"Generated raw file path: {raw_file_path}")
+        logger.debug(f"Generated raw GCS key: {raw_gcs_key}")
 
-        # Generate presigned URL for raw file upload
+        logger.info("Generating presigned URL")
         presigned_url = await bucket_service.generate_presigned_url(
-            file_path=raw_file_path,  # Pass the file_path directly
-            expiration=180,  # 3 minutes
+            file_path=raw_file_path,
+            expiration=180,
             session_id=session_id,
         )
+        logger.debug(f"Presigned URL generated: {presigned_url}")
 
-        return {
+        response_data = {
             "completed": False,
             "message": "Upload the file to the provided presigned URL",
             "session_id": session_id,
             "presigned_url": presigned_url,
             "raw_file_path": raw_gcs_key,
         }
+        logger.info(f"Returning presigned URL response: {response_data}")
+        return response_data
 
+    except HTTPException as he:
+        logger.error(f"HTTPException occurred: {str(he)}")
+        raise
     except Exception as e:
-        print(f"Error in upload: {e}")
+        logger.error(f"Unexpected error in upload: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to initiate file upload.")
 
 

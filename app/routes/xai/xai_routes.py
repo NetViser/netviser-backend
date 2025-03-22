@@ -421,12 +421,16 @@ async def get_attack_detection_xai_summary(
 
             # Calculate target number of matching and non-matching rows
             target_matching = int(MAX_BEESWARM_ROWS * 0.7)  # 70% of the total
-            target_non_matching = MAX_BEESWARM_ROWS - target_matching  # 30% of the total
+            target_non_matching = (
+                MAX_BEESWARM_ROWS - target_matching
+            )  # 30% of the total
             num_matching = len(matching_rows)
 
             if num_matching >= target_matching:
                 # If we have enough matching rows, take 70% from matching and 30% from non-matching
-                matching_sample = matching_rows.sample(n=target_matching, random_state=42)
+                matching_sample = matching_rows.sample(
+                    n=target_matching, random_state=42
+                )
                 if len(non_matching_rows) >= target_non_matching:
                     non_matching_sample = non_matching_rows.sample(
                         n=target_non_matching, random_state=42
@@ -563,6 +567,7 @@ async def get_attack_detection_xai_summary(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Failed to retrieve or process data.",
         )
+
 
 @router.get("/summary/bar/explanation")
 async def get_attack_detection_xai_summary_bar_explanation(
