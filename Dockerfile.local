@@ -18,6 +18,7 @@ RUN python -m pip install --upgrade pip --no-cache-dir && \
 # Copy application files
 COPY ./app /code/app
 COPY ./model /code/model
+COPY credential/gcs_credential.json /code/credential/gcs_credential.json
 
 # Set PATH to include PDM's virtual environment
 ENV PATH="/code/.venv/bin:$PATH"
