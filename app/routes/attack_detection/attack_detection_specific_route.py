@@ -6,7 +6,7 @@ import io
 
 from app.schemas.overview_visualization import AttackDetectionResponse
 from app.services.input_handle_service import preprocess
-from app.services.s3_service import S3
+from app.services.bucket_service import GCS
 from app.services.redis_service import RedisClient
 from app.configs.config import get_settings
 
@@ -253,7 +253,7 @@ def compute_means(data: list, fields: list) -> Dict[str, float]:
 async def get_specific_attack_detection(
     attack_type: str,
     session_id: Optional[str] = Cookie(None),
-    s3_service: S3 = Depends(S3),
+    bucket_service: GCS = Depends(GCS),
 ):
     if not session_id:
         return Response(status_code=400, content="Session ID missing")
@@ -263,7 +263,7 @@ async def get_specific_attack_detection(
         if not session_data:
             return Response(status_code=400, content="Session Expired or not found")
 
-        file_data = await s3_service.read(session_data)
+        file_data = await bucket_service.read(session_data)
         file_like_object = io.BytesIO(file_data)
         data_frame = await preprocess(file_like_object)
         data_frame.reset_index(inplace=True)
