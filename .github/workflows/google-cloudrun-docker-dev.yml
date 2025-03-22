@@ -49,7 +49,7 @@ jobs:
             --project ${{ env.GC_PROJECT_ID }} \
             --cpu 8 \
             --max-instances 1 \
-            --memory 32Gi \
+            --memory 16Gi \
             --platform managed \
             --set-env-vars "GC_PROJECT_ID=${{ env.GC_PROJECT_ID }},GCS_BUCKET_NAME=${{ env.GCS_BUCKET_NAME }},GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }},GEMINI_MODEL=${{ secrets.GEMINI_MODEL }},LAMBDA_INFERENCE_FUNCTION_NAME=${{ secrets.LAMBDA_INFERENCE_FUNCTION_NAME }},MAX_UPLOAD_SIZE=${{ secrets.MAX_UPLOAD_SIZE }},REDIS_HOST=${{ secrets.REDIS_HOST }},REDIS_PASSWORD=${{ secrets.REDIS_PASSWORD }},REDIS_PORT=${{ secrets.REDIS_PORT }},REDIS_USERNAME=${{ secrets.REDIS_USERNAME }},S3_BUCKET_NAME=${{ secrets.S3_BUCKET_NAME }},ENV=${{ secrets.ENV }}"
 

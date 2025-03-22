@@ -1,7 +1,6 @@
 import importlib
 import os
 from fastapi import APIRouter, FastAPI
-from app.configs.config import Settings, get_settings
 from app.routes.xai.xai_routes import router as xai_router
 from app.routes.attack_visualization.attack_visualization_routes import (
     router as attack_visualization_router,
@@ -12,7 +11,6 @@ from app.routes.attack_detection.attack_detection_specific_route import (
 from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
-settings = get_settings()
 
 # Include the XAI router
 app.include_router(xai_router)
@@ -46,5 +44,4 @@ for file in route_files:
 
 @app.get("/")
 async def root():
-    print("settings", Settings.GCS_CREDENTIALS_JSON)
     return {"message": "Healthcheck Passed"}
