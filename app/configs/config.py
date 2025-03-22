@@ -19,6 +19,11 @@ class Settings(BaseSettings):
 
     MAX_UPLOAD_SIZE: Optional[int] = None
     ENV: Optional[str] = None
+
+    # Google Cloud Storage
+    GCS_BUCKET_NAME: Optional[str] = None
+    GCS_CREDENTIALS_JSON_PATH: Optional[str] = None
+    GC_PROJECT_ID: Optional[str] = None
     
     # New properties in uppercase with default values
     SECURE_COOKIE: bool = False

@@ -1,8 +1,5 @@
-import asyncio
-from collections import Counter
 import io
-import uuid
-
+from io import StringIO
 import numpy as np
 from app.services.gemini_service import GeminiService
 from app.services.redis_service import RedisClient
@@ -17,13 +14,13 @@ from fastapi import (
 )
 from typing import Optional
 from app.configs.config import get_settings
-import xgboost as xgb
 import pandas as pd
-import os
-import joblib
 import shap
-from app.services.s3_service import S3
-from app.services.input_handle_service import preprocess
+from app.services.bucket_service import GCS
+from app.services.model_service import (
+    feature_columns,
+    get_model_artifacts,
+)
 from app.services.xai_service import compute_beeswarm_jitter, normalize_feature
 
 router = APIRouter(prefix="/api/attack-detection/xai", tags=["xai"])
@@ -36,10 +33,10 @@ async def get_attack_detection_xai(
     attack_type: str,
     data_point_id: int,
     session_id: Optional[str] = Cookie(None),
-    s3_service: S3 = Depends(S3),
+    bucket_service: GCS = Depends(GCS),
 ):
     """
-    Retrieve the data for XAI stored in S3 based on the session_id.
+    Retrieve the data for XAI stored in GCS based on the session_id.
     """
     if not session_id:
         raise HTTPException(status_code=400, detail="Session ID missing")
@@ -49,72 +46,51 @@ async def get_attack_detection_xai(
     force_plot_image_key = f"{base_key}/force_plot/image.png"
     force_plot_text_key = f"{base_key}/force_plot/value.text"
 
-    # Check if both the image and SHAP text file already exist in S3.
-    if await s3_service.file_exists(
+    # Check if both the image and SHAP text file already exist in GCS.
+    if await bucket_service.file_exists(
         filename=force_plot_image_key, session_id=session_id
-    ) and await s3_service.file_exists(
+    ) and await bucket_service.file_exists(
         filename=force_plot_text_key, session_id=session_id
     ):
-        print("Both files exist in S3.", force_plot_image_key, force_plot_text_key)
-        image_url = s3_service.get_url(
-            s3_key=force_plot_image_key, session_id=session_id, expiration=21600
+        print("Both files exist in GCS.", force_plot_image_key, force_plot_text_key)
+        image_url = bucket_service.get_url(
+            gcs_key=force_plot_image_key, session_id=session_id, expiration=21600
         )
 
-        shap_txt_data = await s3_service.read(
+        shap_txt_data = await bucket_service.read(
             f"uploads/{session_id}/{force_plot_text_key}"
         )
         shap_text = shap_txt_data.decode("utf-8")
         return {"force_plot_url": image_url}
-
-    print("pas the check")
 
     try:
         session_data = redis_client.get_session_data(session_id)
         if not session_data:
             raise HTTPException(status_code=400, detail="Session Expired or not found")
 
-        print("session_data", session_data)
-
-        file_data = await s3_service.read(session_data)
+        file_data = await bucket_service.read(session_data)
         file_like_object = io.BytesIO(file_data)
         df = pd.read_csv(file_like_object, engine="pyarrow", dtype_backend="pyarrow")
         df.reset_index(inplace=True)
 
         # Load the pre-trained model and scaler
-        model = xgb.Booster()
-        model.load_model(os.path.join("model", "xgb_booster.model"))
-        scaler = joblib.load(os.path.join("model", "scaler.pkl"))
-        label_encoder = joblib.load(os.path.join("model", "label_encoder.pkl"))
+        model, scaler, label_encoder = get_model_artifacts()
 
         explainer = shap.TreeExplainer(model)
-        feature_cols = [
-            "Src Port",
-            "Dst Port",
-            "Total TCP Flow Time",
-            "Bwd Init Win Bytes",
-            "Bwd Packet Length Std",
-            "Total Length of Fwd Packet",
-            "Fwd Packet Length Max",
-            "Bwd IAT Mean",
-            "Flow IAT Min",
-            "Fwd PSH Flags",
-        ]
 
-        X = df[feature_cols]
+        X = df[feature_columns]
 
         # Scale the input features
         X_scaled = scaler.transform(X)
-        X_scaled_df = pd.DataFrame(X_scaled, columns=feature_cols)
+        X_scaled_df = pd.DataFrame(X_scaled, columns=feature_columns)
 
         # Prepare un-scaled data for SHAP values
-        X_unscaled = df[feature_cols]
+        X_unscaled = df[feature_columns]
 
         # Single network flow data point
         single_instance_scaled = X_scaled_df.iloc[[data_point_id]]
-        dtest_single = xgb.DMatrix(single_instance_scaled)
 
         # Get predicted class
-        print("A1", df["Label"].iloc[data_point_id])
         predicted_class_index = label_encoder.transform(
             [df["Label"].iloc[data_point_id]]
         )[0]
@@ -195,7 +171,7 @@ async def get_attack_detection_xai(
                 f"{feature_name:30s} | {feature_value:>12s} | {shap_value:>10.4f}\n"
             )
 
-        # Example final print (for debugging). Then upload shap_text to S3 as before.
+        # Example final print (for debugging). Then upload shap_text to GCS as before.
         print("\nGenerated SHAP Text:\n", shap_text)
 
         upload_force_plot_image_file = UploadFile(
@@ -205,12 +181,12 @@ async def get_attack_detection_xai(
             filename="force_plot.text", file=io.BytesIO(shap_text.encode("utf-8"))
         )
 
-        await s3_service.upload(
+        await bucket_service.upload(
             file=upload_force_plot_image_file,
             file_path=force_plot_image_key,
             session_id=session_id,
         )
-        await s3_service.upload(
+        await bucket_service.upload(
             file=upload_force_plot_text_file,
             file_path=force_plot_text_key,
             session_id=session_id,
@@ -219,8 +195,8 @@ async def get_attack_detection_xai(
         return {
             attack_type: attack_type,
             "data_point_id": data_point_id,
-            "force_plot_url": s3_service.get_url(
-                s3_key=force_plot_image_key, session_id=session_id, expiration=21600
+            "force_plot_url": bucket_service.get_url(
+                gcs_key=force_plot_image_key, session_id=session_id, expiration=21600
             ),
         }
     except Exception as e:
@@ -233,7 +209,7 @@ async def get_attack_detection_xai_explanation(
     attack_type: str,
     data_point_id: int,
     session_id: Optional[str] = Cookie(None),
-    s3_service: S3 = Depends(S3),
+    bucket_service: GCS = Depends(GCS),
     gemini_service: GeminiService = Depends(GeminiService),
 ):
     # Validate the session cookie
@@ -254,15 +230,15 @@ async def get_attack_detection_xai_explanation(
     force_plot_text_key = f"{base_key}/force_plot/value.text"
     gemini_explanation_key = f"{base_key}/force_plot/explanation.text"
 
-    # Check if the SHAP force plot text file exists in S3
+    # Check if the SHAP force plot text file exists in GCS
     try:
-        file_exists = await s3_service.file_exists(
+        file_exists = await bucket_service.file_exists(
             filename=force_plot_text_key, session_id=session_id
         )
     except Exception as exc:
-        # Optionally log the exception: logger.error(f"S3 file existence check error: {exc}")
+        # Optionally log the exception: logger.error(f"GCS file existence check error: {exc}")
         raise HTTPException(
-            status_code=500, detail="Error checking S3 for force plot text file"
+            status_code=500, detail="Error checking GCS for force plot text file"
         )
 
     if not file_exists:
@@ -271,20 +247,20 @@ async def get_attack_detection_xai_explanation(
             detail=f"Force plot text not found for {attack_type} {data_point_id}.",
         )
 
-    # Check if the Gemini explanation file already exists in S3; if so, return it directly.
+    # Check if the Gemini explanation file already exists in GCS; if so, return it directly.
     try:
-        explanation_exists = await s3_service.file_exists(
+        explanation_exists = await bucket_service.file_exists(
             filename=gemini_explanation_key, session_id=session_id
         )
     except Exception as exc:
-        # Optionally log the exception: logger.error(f"S3 explanation file check error: {exc}")
+        # Optionally log the exception: logger.error(f"GCS explanation file check error: {exc}")
         raise HTTPException(
-            status_code=500, detail="Error checking S3 for explanation file"
+            status_code=500, detail="Error checking GCS for explanation file"
         )
 
     if explanation_exists:
         try:
-            explanation_data = await s3_service.read(
+            explanation_data = await bucket_service.read(
                 f"uploads/{session_id}/{gemini_explanation_key}"
             )
             explanation_text = explanation_data.decode("utf-8")
@@ -292,19 +268,19 @@ async def get_attack_detection_xai_explanation(
         except Exception as exc:
             # Optionally log the exception: logger.error(f"Error reading explanation file: {exc}")
             raise HTTPException(
-                status_code=500, detail="Error reading explanation file from S3"
+                status_code=500, detail="Error reading explanation file from GCS"
             )
 
-    # Read the SHAP force plot text file from S3
+    # Read the SHAP force plot text file from GCS
     try:
-        shap_txt_data = await s3_service.read(
+        shap_txt_data = await bucket_service.read(
             f"uploads/{session_id}/{force_plot_text_key}"
         )
         shap_text = shap_txt_data.decode("utf-8")
     except Exception as exc:
         # Optionally log the exception: logger.error(f"Error reading SHAP text file: {exc}")
         raise HTTPException(
-            status_code=500, detail="Error reading SHAP text file from S3"
+            status_code=500, detail="Error reading SHAP text file from GCS"
         )
 
     # Generate the explanation using Gemini
@@ -318,7 +294,7 @@ async def get_attack_detection_xai_explanation(
             status_code=500, detail="Error generating explanation from Gemini API"
         )
 
-    # Save the generated explanation to S3 for future reuse
+    # Save the generated explanation to GCS for future reuse
     try:
         from fastapi import UploadFile  # Ensure UploadFile is imported
         import io
@@ -326,7 +302,7 @@ async def get_attack_detection_xai_explanation(
         upload_explanation_file = UploadFile(
             filename="explanation.text", file=io.BytesIO(explanation.encode("utf-8"))
         )
-        await s3_service.upload(
+        await bucket_service.upload(
             file=upload_explanation_file,
             file_path=gemini_explanation_key,
             session_id=session_id,
@@ -334,7 +310,7 @@ async def get_attack_detection_xai_explanation(
     except Exception as exc:
         # Optionally log the exception: logger.error(f"Error saving explanation file: {exc}")
         # Do not block the response if saving fails; simply log the error.
-        print("Warning: Failed to save explanation file to S3:", exc)
+        print("Warning: Failed to save explanation file to GCS:", exc)
 
     return {"explanation": explanation}
 
@@ -343,11 +319,11 @@ async def get_attack_detection_xai_explanation(
 async def get_attack_detection_xai_summary(
     attack_type: str,
     session_id: Optional[str] = Cookie(None),
-    s3_service: S3 = Depends(S3),
+    bucket_service: GCS = Depends(GCS),
 ):
     """
     Retrieve or generate a SHAP bar-summary CSV for the specified attack_type
-    and session_id from S3. If the CSV does not exist, compute and upload it.
+    and session_id from GCS. If the CSV does not exist, compute and upload it.
     """
     # Validate session_id
     if not session_id:
@@ -369,23 +345,23 @@ async def get_attack_detection_xai_summary(
             detail="Error retrieving session data",
         )
 
-    # Check if both bar-summary CSV and beeswarm summary CSV exist in S3.
+    # Check if both bar-summary CSV and beeswarm summary CSV exist in GCS.
     # If they do, read and return them directly.
     base_key = f"xai/{attack_type}/summary"
     bar_summary_key = f"{base_key}/bar_summary/value.csv"
     beeswarm_summary_key = f"{base_key}/beeswarm_summary/value.csv"
     try:
-        bar_csv_exists = await s3_service.file_exists(
+        bar_csv_exists = await bucket_service.file_exists(
             filename=bar_summary_key, session_id=session_id
         )
-        beeswarm_csv_exists = await s3_service.file_exists(
+        beeswarm_csv_exists = await bucket_service.file_exists(
             filename=beeswarm_summary_key, session_id=session_id
         )
         if bar_csv_exists and beeswarm_csv_exists:
-            bar_summary_data = await s3_service.read(
+            bar_summary_data = await bucket_service.read(
                 f"uploads/{session_id}/{bar_summary_key}"
             )
-            beeswarm_summary_data = await s3_service.read(
+            beeswarm_summary_data = await bucket_service.read(
                 f"uploads/{session_id}/{beeswarm_summary_key}"
             )
             bar_summary_df = pd.read_csv(io.BytesIO(bar_summary_data))
@@ -408,27 +384,15 @@ async def get_attack_detection_xai_summary(
                 detail="Session Expired or not found",
             )
 
-        # Load dataset from S3
-        file_data = await s3_service.read(session_data)
+        # Load dataset from GCS
+        file_data = await bucket_service.read(session_data)
         file_like_object = io.BytesIO(file_data)
         df = pd.read_csv(file_like_object, engine="pyarrow", dtype_backend="pyarrow")
         df.reset_index(drop=True, inplace=True)
 
         # Load model artifacts
-        model = xgb.Booster()
-        model_path = os.path.join("model", "xgb_booster.model")
-        scaler_path = os.path.join("model", "scaler.pkl")
-        label_enc_path = os.path.join("model", "label_encoder.pkl")
-
         try:
-            model.load_model(model_path)
-            scaler = joblib.load(scaler_path)
-            label_encoder = joblib.load(label_enc_path)
-        except FileNotFoundError:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Model or scaler file missing on the server.",
-            )
+            model, scaler, label_encoder = get_model_artifacts()
         except Exception:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -438,36 +402,16 @@ async def get_attack_detection_xai_summary(
         explainer = shap.TreeExplainer(model)
 
         # Prepare features & compute SHAP
-        feature_cols = [
-            "Src Port",
-            "Dst Port",
-            "Total TCP Flow Time",
-            "Bwd Init Win Bytes",
-            "Bwd Packet Length Std",
-            "Total Length of Fwd Packet",
-            "Fwd Packet Length Max",
-            "Bwd IAT Mean",
-            "Flow IAT Min",
-            "Fwd PSH Flags",
-        ]
-        X = df[feature_cols]
+        X = df[feature_columns]
         X_scaled = scaler.transform(X)
-        X_scaled_df = pd.DataFrame(X_scaled, columns=feature_cols)
+        X_scaled_df = pd.DataFrame(X_scaled, columns=feature_columns)
 
-        # Sample the data to a maximum of 30,000 rows before computing SHAP,
+        # Sample the data to a maximum of 10,000 rows before computing SHAP,
         # aiming for 70% of the sample to match the requested attack_type
-        MAX_BEESWARM_ROWS = 20_000
+        MAX_BEESWARM_ROWS = 10_000
         if len(X_scaled_df) > MAX_BEESWARM_ROWS:
             # Get the original labels from the dataset
             y = df["Label"]  # Assuming "Label" is the column with attack types
-            # Convert attack_type to the encoded form if needed
-            try:
-                attack_class_encoded = label_encoder.transform([attack_type])[0]
-            except ValueError:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"'{attack_type}' not recognized in model classes.",
-                )
 
             # Filter rows where the label matches the attack_type
             matching_mask = y == attack_type  # Use original label if not encoded in df
@@ -524,10 +468,10 @@ async def get_attack_detection_xai_summary(
         # Compute csv data for bar summary
         mean_abs_shap_values = np.mean(np.abs(shap_values_attack_class), axis=0)
         sorted_idx = np.argsort(mean_abs_shap_values)
-        sorted_features_desc = [feature_cols[i] for i in sorted_idx[::-1]]
+        sorted_features_desc = [feature_columns[i] for i in sorted_idx[::-1]]
         sorted_importances_desc = mean_abs_shap_values[sorted_idx[::-1]]
 
-        # Create DataFrame & upload to S3
+        # Create DataFrame & upload to GCS
         bar_summary_df = pd.DataFrame(
             {"feature": sorted_features_desc, "mean_abs_shap": sorted_importances_desc}
         )
@@ -536,7 +480,7 @@ async def get_attack_detection_xai_summary(
         bar_summary_df.to_csv(bar_summary_csv_buffer, index=False)
         bar_summary_csv_buffer.seek(0)
 
-        await s3_service.upload(
+        await bucket_service.upload(
             file=UploadFile(file=bar_summary_csv_buffer),
             file_path=bar_summary_key,
             session_id=session_id,
@@ -596,13 +540,13 @@ async def get_attack_detection_xai_summary(
             columns=["feature_value", "jitter_offset", "index"], inplace=True
         )
 
-        # Upload the beeswarm summary CSV to S3
+        # Upload the beeswarm summary CSV to GCS
         beeswarm_summary_df = melted_df.copy()
         beeswarm_summary_csv_buffer = io.BytesIO()
         beeswarm_summary_df.to_csv(beeswarm_summary_csv_buffer, index=False)
         beeswarm_summary_csv_buffer.seek(0)
 
-        await s3_service.upload(
+        await bucket_service.upload(
             file=UploadFile(file=beeswarm_summary_csv_buffer),
             file_path=beeswarm_summary_key,
             session_id=session_id,
@@ -624,7 +568,7 @@ async def get_attack_detection_xai_summary(
 async def get_attack_detection_xai_summary_bar_explanation(
     attack_type: str,
     session_id: Optional[str] = Cookie(None),
-    s3_service: S3 = Depends(S3),
+    bucket_service: GCS = Depends(GCS),
     gemini_service: GeminiService = Depends(GeminiService),
 ):
     """
@@ -633,10 +577,10 @@ async def get_attack_detection_xai_summary_bar_explanation(
 
     Steps:
       1. Validate the session.
-      2. Check if the bar-summary CSV file exists in S3.
+      2. Check if the bar-summary CSV file exists in GCS.
       3. If a Gemini explanation file already exists, return its content.
-      4. Otherwise, read the CSV data from S3, generate the explanation using the Gemini service,
-         upload the explanation to S3, and return it.
+      4. Otherwise, read the CSV data from GCS, generate the explanation using the Gemini service,
+         upload the explanation to GCS, and return it.
     """
     # Validate session_id
     if not session_id:
@@ -648,15 +592,15 @@ async def get_attack_detection_xai_summary_bar_explanation(
     bar_summary_key = f"{base_key}/bar_summary/value.csv"
     gemini_explanation_key = f"{base_key}/bar_summary/explanation.text"
 
-    # Check if the bar-summary CSV exists in S3
+    # Check if the bar-summary CSV exists in GCS
     try:
-        csv_exists = await s3_service.file_exists(
+        csv_exists = await bucket_service.file_exists(
             filename=bar_summary_key, session_id=session_id
         )
     except Exception as exc:
-        print("Error checking S3 for bar-summary CSV file:", exc)
+        print("Error checking GCS for bar-summary CSV file:", exc)
         raise HTTPException(
-            status_code=500, detail="Error checking S3 for bar-summary CSV file"
+            status_code=500, detail="Error checking GCS for bar-summary CSV file"
         )
 
     print("csv_exists", csv_exists)
@@ -666,39 +610,39 @@ async def get_attack_detection_xai_summary_bar_explanation(
             detail=f"Bar-summary CSV not found for attack type '{attack_type}'.",
         )
 
-    # Check if the Gemini explanation already exists in S3
+    # Check if the Gemini explanation already exists in GCS
     try:
-        explanation_exists = await s3_service.file_exists(
+        explanation_exists = await bucket_service.file_exists(
             filename=gemini_explanation_key, session_id=session_id
         )
     except Exception as exc:
         raise HTTPException(
-            status_code=500, detail="Error checking S3 for explanation file"
+            status_code=500, detail="Error checking GCS for explanation file"
         )
 
     if explanation_exists:
         try:
-            explanation_data = await s3_service.read(
+            explanation_data = await bucket_service.read(
                 f"uploads/{session_id}/{gemini_explanation_key}"
             )
             explanation_text = explanation_data.decode("utf-8")
             return {"explanation": explanation_text}
         except Exception as exc:
             raise HTTPException(
-                status_code=500, detail="Error reading explanation file from S3"
+                status_code=500, detail="Error reading explanation file from GCS"
             )
 
-    # Read the bar-summary CSV file from S3
+    # Read the bar-summary CSV file from GCS
     try:
-        print("Reading bar-summary CSV file from S3")
-        bar_summary_data = await s3_service.read(
+        print("Reading bar-summary CSV file from GCS")
+        bar_summary_data = await bucket_service.read(
             f"uploads/{session_id}/{bar_summary_key}"
         )
         bar_summary_csv = bar_summary_data.decode("utf-8")
         print("bar_summary_csv\n", bar_summary_csv)
     except Exception as exc:
         raise HTTPException(
-            status_code=500, detail="Error reading bar-summary CSV file from S3"
+            status_code=500, detail="Error reading bar-summary CSV file from GCS"
         )
 
     # Generate the explanation using Gemini
@@ -713,20 +657,20 @@ async def get_attack_detection_xai_summary_bar_explanation(
             status_code=500, detail="Error generating explanation from Gemini API"
         )
 
-    # Upload the generated explanation to S3 for future reuse
+    # Upload the generated explanation to GCS for future reuse
     try:
         upload_explanation_file = UploadFile(
             filename="explanation.text",
             file=io.BytesIO(explanation.encode("utf-8")),
         )
-        await s3_service.upload(
+        await bucket_service.upload(
             file=upload_explanation_file,
             file_path=gemini_explanation_key,
             session_id=session_id,
         )
     except Exception as exc:
         # Log the exception, but do not block the response if saving fails.
-        print("Warning: Failed to save explanation file to S3:", exc)
+        print("Warning: Failed to save explanation file to GCS:", exc)
 
     return {"explanation": explanation}
 
@@ -735,7 +679,7 @@ async def get_attack_detection_xai_summary_bar_explanation(
 async def get_attack_detection_xai_summary_beeswarm_explanation(
     attack_type: str,
     session_id: Optional[str] = Cookie(None),
-    s3_service: S3 = Depends(S3),
+    bucket_service: GCS = Depends(GCS),
     gemini_service: GeminiService = Depends(GeminiService),
 ):
     """
@@ -744,30 +688,30 @@ async def get_attack_detection_xai_summary_beeswarm_explanation(
 
     Steps:
       1. Validate the session ID.
-      2. Check if the beeswarm-summary CSV file exists in S3.
+      2. Check if the beeswarm-summary CSV file exists in GCS.
       3. If a Gemini explanation file already exists, return its content.
-      4. Otherwise, read the CSV data from S3, filter it to include only the top 2 objects
+      4. Otherwise, read the CSV data from GCS, filter it to include only the top 2 objects
          per unique feature (based on the largest absolute SHAP value), generate the explanation
-         using the Gemini service, upload the explanation to S3, and return it.
+         using the Gemini service, upload the explanation to GCS, and return it.
     """
     # Validate session_id
     if not session_id:
         raise HTTPException(status_code=400, detail="Session ID missing")
 
-    # Define S3 file keys
+    # Define GCS file keys
     base_key = f"xai/{attack_type}/summary"
     beeswarm_summary_key = f"{base_key}/beeswarm_summary/value.csv"
     gemini_explanation_key = f"{base_key}/beeswarm_summary/explanation.text"
 
-    # Check if the beeswarm-summary CSV exists in S3
+    # Check if the beeswarm-summary CSV exists in GCS
     try:
-        csv_exists = await s3_service.file_exists(
+        csv_exists = await bucket_service.file_exists(
             filename=beeswarm_summary_key, session_id=session_id
         )
     except Exception as exc:
-        print("Error checking S3 for beeswarm-summary CSV file:", exc)
+        print("Error checking GCS for beeswarm-summary CSV file:", exc)
         raise HTTPException(
-            status_code=500, detail="Error checking S3 for beeswarm-summary CSV file"
+            status_code=500, detail="Error checking GCS for beeswarm-summary CSV file"
         )
 
     if not csv_exists:
@@ -776,49 +720,46 @@ async def get_attack_detection_xai_summary_beeswarm_explanation(
             detail=f"Beeswarm-summary CSV not found for attack type '{attack_type}'.",
         )
 
-    # Check if the Gemini explanation already exists in S3
+    # Check if the Gemini explanation already exists in GCS
     try:
-        explanation_exists = await s3_service.file_exists(
+        explanation_exists = await bucket_service.file_exists(
             filename=gemini_explanation_key, session_id=session_id
         )
     except Exception as exc:
-        print("Error checking S3 for existing explanation file:", exc)
+        print("Error checking GCS for existing explanation file:", exc)
         raise HTTPException(
-            status_code=500, detail="Error checking S3 for existing explanation file"
+            status_code=500, detail="Error checking GCS for existing explanation file"
         )
 
     # if explanation_exists:
     #     try:
-    #         explanation_data = await s3_service.read(
+    #         explanation_data = await bucket_service.read(
     #             f"uploads/{session_id}/{gemini_explanation_key}"
     #         )
     #         explanation_text = explanation_data.decode("utf-8")
     #         return {"explanation": explanation_text}
     #     except Exception as exc:
-    #         print("Error reading existing explanation file from S3:", exc)
+    #         print("Error reading existing explanation file from GCS:", exc)
     #         raise HTTPException(
     #             status_code=500,
-    #             detail="Error reading existing explanation file from S3",
+    #             detail="Error reading existing explanation file from GCS",
     #         )
 
-    # Read the full beeswarm-summary CSV from S3
+    # Read the full beeswarm-summary CSV from GCS
     try:
-        beeswarm_summary_data = await s3_service.read(
+        beeswarm_summary_data = await bucket_service.read(
             f"uploads/{session_id}/{beeswarm_summary_key}"
         )
         beeswarm_summary_csv = beeswarm_summary_data.decode("utf-8")
     except Exception as exc:
-        print("Error reading beeswarm-summary CSV file from S3:", exc)
+        print("Error reading beeswarm-summary CSV file from GCS:", exc)
         raise HTTPException(
-            status_code=500, detail="Error reading beeswarm-summary CSV file from S3"
+            status_code=500, detail="Error reading beeswarm-summary CSV file from GCS"
         )
 
     # Filter the CSV: select only the top 2 rows per unique feature based on largest |shap_value|
     try:
         # Use pandas to parse and filter the data
-        from io import StringIO
-        import pandas as pd
-
         df = pd.read_csv(StringIO(beeswarm_summary_csv))
         # Group by "feature" and take the top 2 rows sorted by absolute shap_value
         filtered_df = df.groupby("feature", group_keys=False).apply(
@@ -849,19 +790,19 @@ async def get_attack_detection_xai_summary_beeswarm_explanation(
             status_code=500, detail="Error generating explanation from Gemini API"
         )
 
-    # Upload the generated explanation to S3 for future reuse
+    # Upload the generated explanation to GCS for future reuse
     try:
         explanation_bytes = explanation.encode("utf-8")
         upload_explanation_file = UploadFile(
             filename="explanation.text", file=io.BytesIO(explanation_bytes)
         )
-        await s3_service.upload(
+        await bucket_service.upload(
             file=upload_explanation_file,
             file_path=gemini_explanation_key,
             session_id=session_id,
         )
     except Exception as exc:
-        print("Warning: Failed to save beeswarm explanation file to S3:", exc)
+        print("Warning: Failed to save beeswarm explanation file to GCS:", exc)
         # Do not block returning the explanation if saving fails
 
     return {"explanation": explanation}
