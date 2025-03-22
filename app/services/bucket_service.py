@@ -1,4 +1,5 @@
 from io import BytesIO
+import os
 from typing import Any, Dict, Optional
 from fastapi import Cookie, HTTPException, UploadFile
 import asyncio
@@ -30,7 +31,6 @@ class GCS:
     def initialize_client(self):
         """Initialize the Google Cloud Storage client."""
         bucket_name = settings.GCS_BUCKET_NAME
-        credentials = settings.GCS_CREDENTIALS_JSON_PATH
         
         if not bucket_name:
             raise ValueError("GCS_BUCKET_NAME is missing.")
@@ -38,13 +38,14 @@ class GCS:
         self.bucket_name = bucket_name
         self.path_prefix = "uploads"
 
-        # If credentials are provided as JSON string (from GitHub secret)
-        if credentials:
-            credentials = service_account.Credentials.from_service_account_file(credentials)
+        # Check if credentials file is provided (local dev)
+        credentials_path = settings.GCS_CREDENTIALS_JSON_PATH
+        if credentials_path and os.path.exists(credentials_path):
+            credentials = service_account.Credentials.from_service_account_file(credentials_path)
             self.client = storage.Client(credentials=credentials, project=settings.GC_PROJECT_ID)
         else:
-            # Fallback to default credentials (useful for Cloud Run with proper IAM)
-            self.client = storage.Client()
+            # Fallback to Application Default Credentials (production on Cloud Run)
+            self.client = storage.Client(project=settings.GC_PROJECT_ID)
 
         self.bucket = self.client.bucket(bucket_name)
 
