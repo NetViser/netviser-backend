@@ -79,6 +79,7 @@ class GCS:
         try:
             logger.info(f"Generating signed PUT URL for: {gcs_key} with max size 1GB")
             blob = self.bucket.blob(gcs_key)
+            conditions = [["content-length-range", 0, MAX_FILE_SIZE]]
             if self.use_adc:
                 url = blob.generate_signed_url(
                     expiration=expiration,
@@ -86,14 +87,14 @@ class GCS:
                     version="v4",
                     service_account_email=self.service_account_email,
                     access_token=self.credentials.token,
-                    content_length_range=(0, MAX_FILE_SIZE)  # Restrict to 0-1GB
+                    conditions=conditions
                 )
             else:
                 url = blob.generate_signed_url(
                     expiration=expiration,
                     method="PUT",
                     version="v4",
-                    content_length_range=(0, MAX_FILE_SIZE)  # Restrict to 0-1GB
+                    conditions=conditions
                 )
             logger.info(f"Generated presigned URL: {url}")
             return url
