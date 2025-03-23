@@ -74,7 +74,6 @@ class GCS:
             raise HTTPException(status_code=400, detail="Session ID missing")
 
         gcs_key = f"{self.path_prefix}/{session_id}/{file_path}"
-        MAX_FILE_SIZE = 1_073_741_824  # 1GB in bytes
 
         try:
             logger.info(f"Generating signed PUT URL for: {gcs_key} with max size 1GB")
