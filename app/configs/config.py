@@ -10,9 +10,7 @@ class Settings(BaseSettings):
 
     GEMINI_API_KEY: Optional[str] = None
     GEMINI_MODEL: Optional[str] = None
-    LAMBDA_INFERENCE_FUNCTION_NAME: Optional[str] = None
 
-    MAX_UPLOAD_SIZE: Optional[int] = None
     ENV: Optional[str] = None
 
     # Google Cloud Storage
