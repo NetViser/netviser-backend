@@ -6,11 +6,12 @@ on:
       - 'main'
 
 env:
-  PROJECT_ID: 'netviser-454113'
-  REGION: 'asia-east1'
-  GAR_NAME: 'netviser-gar'
-  GAR_LOCATION: 'asia-east1'
-  SERVICE: 'netviser-app'
+  GC_PROJECT_ID: 'netviser-454113'
+  REGION: 'asia-southeast1'
+  GAR_NAME: 'netviser-backend-gar'
+  GAR_LOCATION: 'asia-southeast1'
+  SERVICE: 'netviser-backend'
+  GCS_BUCKET_NAME: 'netviser-gcs-asia-southeast1'
 
 jobs:
   deploy:
@@ -35,27 +36,27 @@ jobs:
 
       - name: Build and Push Container
         run: |
-          DOCKER_TAG="${{ env.GAR_LOCATION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.GAR_NAME }}/${{ env.SERVICE }}:${{ github.sha }}"
+          DOCKER_TAG="${{ env.GAR_LOCATION }}-docker.pkg.dev/${{ env.GC_PROJECT_ID }}/${{ env.GAR_NAME }}/${{ env.SERVICE }}:${{ github.sha }}"
           docker build --tag "${DOCKER_TAG}" .
           docker push "${DOCKER_TAG}"
 
-      # Deploy to Cloud Run with custom CPU and memory settings using gcloud
       - name: Deploy to Cloud Run
         run: |
           gcloud run deploy ${{ env.SERVICE }} \
-            --image "${{ env.GAR_LOCATION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.GAR_NAME }}/${{ env.SERVICE }}:${{ github.sha }}" \
+            --image "${{ env.GAR_LOCATION }}-docker.pkg.dev/${{ env.GC_PROJECT_ID }}/${{ env.GAR_NAME }}/${{ env.SERVICE }}:${{ github.sha }}" \
             --region ${{ env.REGION }} \
-            --project ${{ env.PROJECT_ID }} \
+            --project ${{ env.GC_PROJECT_ID }} \
             --cpu 8 \
             --max-instances 1 \
             --memory 16Gi \
             --platform managed \
-            --set-env-vars "AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }},AWS_REGION=${{ secrets.AWS_REGION }},AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }},GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }},GEMINI_MODEL=${{ secrets.GEMINI_MODEL }},LAMBDA_INFERENCE_FUNCTION_NAME=${{ secrets.LAMBDA_INFERENCE_FUNCTION_NAME }},MAX_UPLOAD_SIZE=${{ secrets.MAX_UPLOAD_SIZE }},REDIS_HOST=${{ secrets.REDIS_HOST }},REDIS_PASSWORD=${{ secrets.REDIS_PASSWORD }},REDIS_PORT=${{ secrets.REDIS_PORT }},REDIS_USERNAME=${{ secrets.REDIS_USERNAME }},S3_BUCKET_NAME=${{ secrets.S3_BUCKET_NAME }},ENV=${{ secrets.ENV }}"
+            --service-account "netviser-storage@${{ env.GC_PROJECT_ID }}.iam.gserviceaccount.com" \
+            --set-env-vars "GC_PROJECT_ID=${{ env.GC_PROJECT_ID }},GCS_BUCKET_NAME=${{ env.GCS_BUCKET_NAME }},GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }},GEMINI_MODEL=${{ secrets.GEMINI_MODEL }},MAX_UPLOAD_SIZE=${{ secrets.MAX_UPLOAD_SIZE }},REDIS_HOST=${{ secrets.REDIS_HOST }},REDIS_PASSWORD=${{ secrets.REDIS_PASSWORD }},REDIS_PORT=${{ secrets.REDIS_PORT }},REDIS_USERNAME=${{ secrets.REDIS_USERNAME }},ENV=${{ secrets.ENV }}"
 
       - name: Allow Unauthenticated Access
         run: |
           gcloud run services add-iam-policy-binding ${{ env.SERVICE }} \
             --region=${{ env.REGION }} \
-            --project=${{ env.PROJECT_ID }} \
+            --project=${{ env.GC_PROJECT_ID }} \
             --member="allUsers" \
             --role="roles/run.invoker"

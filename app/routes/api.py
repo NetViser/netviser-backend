@@ -1,12 +1,12 @@
 from collections import Counter
 import io
 import uuid
-
-from app.services.lambda_service import LambdaService
+import pandas as pd
+import logging
+from app.services.model_service import get_model_artifacts, predict_df
 from app.services.redis_service import RedisClient
 from fastapi import (
     APIRouter,
-    File,
     Form,
     Response,
     UploadFile,
@@ -15,10 +15,25 @@ from fastapi import (
     HTTPException,
     Query,
 )
+
 from typing import Optional
 from app.configs.config import get_settings
-from app.services.s3_service import S3
+from app.services.bucket_service import GCS
 from app.services.input_handle_service import preprocess
+from app.services.model_service import (
+    feature_columns,
+    preprocess_df,
+    predict_df,
+    get_model_artifacts,
+)
+
+# Configure logging
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[logging.StreamHandler()],
+)
+logger = logging.getLogger(__name__)
 
 
 router = APIRouter(prefix="/api", tags=["api"])
@@ -34,10 +49,10 @@ redis_client = RedisClient()
 @router.get("/dashboard")
 async def get_dashboard(
     session_id: Optional[str] = Cookie(None),
-    s3_service: S3 = Depends(S3),
+    bucket_service: GCS = Depends(GCS),
 ):
     """
-    Retrieve the data for dashboard stored in S3 based on the session_id.
+    Retrieve the data for dashboard stored in GCS and preprocess it.
     """
     if not session_id:
         return Response(status_code=400, content="Session ID missing")
@@ -47,7 +62,7 @@ async def get_dashboard(
         if not session_data:
             return Response(status_code=400, content="Session Expired or not found")
 
-        file_data = await s3_service.read(session_data)
+        file_data = await bucket_service.read(session_data)
         file_like_object = io.BytesIO(file_data)
 
         data_frame = await preprocess(file_like_object)
@@ -132,7 +147,7 @@ async def fetch_attack_records(
     session_id: Optional[str] = Cookie(None),
     page: int = Query(1, ge=1),  # Default to page 1, must be >= 1
     page_size: int = Query(10, ge=1, le=100),  # Default to 10, max 100 per page
-    s3_service: S3 = Depends(S3),
+    bucket_service: GCS = Depends(GCS),
 ):
     if not session_id:
         return Response(status_code=400, content="Session ID missing")
@@ -142,7 +157,7 @@ async def fetch_attack_records(
         if not session_data:
             return Response(status_code=400, content="Session Expired or not found")
 
-        file_data = await s3_service.read(session_data)
+        file_data = await bucket_service.read(session_data)
         file_like_object = io.BytesIO(file_data)
 
         data_frame = await preprocess(file_like_object)
@@ -198,28 +213,37 @@ async def fetch_attack_records(
 async def upload_file(
     response: Response,
     filename: Optional[str] = Form(None),
-    sample_filename: Optional[str] = Form(None),  # Keep support for sample files
+    sample_filename: Optional[str] = Form(None),
     session_id: Optional[str] = Cookie(None),
-    s3_service: S3 = Depends(S3),
+    bucket_service: GCS = Depends(GCS),
 ):
     """
-    Generate a presigned URL for the client to upload a file directly to S3.
+    Generate a presigned URL for the client to upload a file directly to GCS.
     Supports sample files as an alternative.
     """
-    # Create a new session
-    session_id = str(uuid.uuid4())
-    response.set_cookie(
-        key=SESSION_COOKIE_NAME,
-        value=session_id,
-        max_age=43200,  # 12 hours
-        httponly=True,
-        secure=settings.SECURE_COOKIE,
-        samesite=settings.SAMESITE,
+    logger.debug("Entering /upload endpoint")
+    logger.info(
+        f"Received request with filename: {filename}, sample_filename: {sample_filename}, session_id: {session_id}"
     )
 
+    # Create a new session
+    session_id = str(uuid.uuid4())
+    logger.debug(f"Generated new session_id: {session_id}")
+
     try:
+        logger.info("Setting session cookie")
+        response.set_cookie(
+            key=SESSION_COOKIE_NAME,
+            value=session_id,
+            max_age=43200,
+            httponly=True,
+            secure=settings.SECURE_COOKIE,
+            samesite=settings.SAMESITE,
+        )
+        logger.debug("Session cookie set successfully")
+
         if sample_filename:
-            # Handle sample file case (no presigned URL needed)
+            logger.info(f"Processing sample file: {sample_filename}")
             sample_mapping = {
                 "ssh-ftp.csv": "sample/model-applied/ssh-ftp.csv",
                 "ddos-ftp.csv": "sample/model-applied/ddos-ftp.csv",
@@ -228,101 +252,131 @@ async def upload_file(
                 "portscan_dos_hulk.csv": "sample/model-applied/portscan_dos_hulk.csv",
                 "portscan.csv": "sample/model-applied/portscan.csv",
             }
-            model_applied_s3_key = sample_mapping.get(sample_filename)
-            if not model_applied_s3_key:
+
+            model_applied_gcs_key = sample_mapping.get(sample_filename)
+            if not model_applied_gcs_key:
+                logger.warning(f"Invalid sample file name: {sample_filename}")
                 raise HTTPException(status_code=400, detail="Invalid sample file name")
 
+            logger.debug(f"Mapping found: {model_applied_gcs_key}")
+            logger.info(f"Setting Redis session data for sample file")
             redis_client.set_session_data(
-                session_id, model_applied_s3_key, ttl_in_seconds=43200
+                session_id, model_applied_gcs_key, ttl_in_seconds=43200
             )
-            return {
+            logger.debug("Redis session data set successfully")
+
+            response_data = {
                 "completed": True,
                 "message": "Sample file selected and stored in session",
                 "session_id": session_id,
-                "s3_key": model_applied_s3_key,
+                "bucket_key": model_applied_gcs_key,
             }
+            logger.info(f"Returning successful sample file response: {response_data}")
+            return response_data
 
         # Handle client-side upload with presigned URL
-        raw_file_path = f"network-file/raw/{filename}"
-        raw_s3_key = f"{s3_service.path_prefix}/{session_id}/{raw_file_path}"
+        logger.info("Processing regular file upload")
+        if not filename:
+            logger.warning("No filename provided for regular upload")
+            raise HTTPException(status_code=400, detail="Filename required for upload")
 
-        # Generate presigned URL for raw file upload
-        presigned_url = await s3_service.generate_presigned_url(
-            file_path=raw_file_path,  # Pass the file_path directly
-            expiration=180,  # 3 minutes
+        raw_file_path = f"network-file/raw/{filename}"
+        raw_gcs_key = f"{bucket_service.path_prefix}/{session_id}/{raw_file_path}"
+        logger.debug(f"Generated raw file path: {raw_file_path}")
+        logger.debug(f"Generated raw GCS key: {raw_gcs_key}")
+
+        logger.info("Generating presigned URL")
+        presigned_url = await bucket_service.generate_presigned_url(
+            file_path=raw_file_path,
+            expiration=180,
             session_id=session_id,
         )
+        logger.debug(f"Presigned URL generated: {presigned_url}")
 
-        return {
+        response_data = {
             "completed": False,
             "message": "Upload the file to the provided presigned URL",
             "session_id": session_id,
             "presigned_url": presigned_url,
-            "raw_file_path": raw_s3_key,  # Full S3 key for the raw file
+            "raw_file_path": raw_gcs_key,
         }
+        logger.info(f"Returning presigned URL response: {response_data}")
+        return response_data
 
+    except HTTPException as he:
+        logger.error(f"HTTPException occurred: {str(he)}")
+        raise
     except Exception as e:
-        print(f"Error in upload: {e}")
+        logger.error(f"Unexpected error in upload: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to initiate file upload.")
 
 
 @router.post("/upload-complete")
 async def upload_complete(
     session_id: str = Cookie(...),
-    raw_file_path: str = Form(...),  # Full S3 key from /upload
-    s3_service: S3 = Depends(S3),  # Inject S3 service
-    lambda_service: LambdaService = Depends(LambdaService),
+    raw_file_path: str = Form(...),
+    bucket_service: GCS = Depends(GCS),
 ):
     """
-    Trigger Lambda processing after the client uploads the file to S3.
+    Trigger Lambda processing after the client uploads the file to GCS.
     Checks if raw file exists and generates model_applied_file_path internally.
     """
     try:
-        # Step 1: Check if the raw file exists in S3
-        file_exists = await s3_service.object_exists(s3_key=raw_file_path)
+        file_exists = await bucket_service.object_exists(gcs_key=raw_file_path)
         if not file_exists:
             raise HTTPException(
                 status_code=404,
-                detail=f"Raw file not found in S3 at path: {raw_file_path}",
+                detail=f"Raw file not found in GCS at path: {raw_file_path}",
             )
 
-        # Step 2: Generate a unique model_applied_file_path
         raw_filename = raw_file_path.split("/")[-1]  # Extract filename from path
         model_applied_file_path = "network-file/model-applied/" + raw_filename
-        model_applied_s3_key = (
-            f"{s3_service.path_prefix}/{session_id}/{model_applied_file_path}"
+
+        model_applied_gcs_key = (
+            f"{bucket_service.path_prefix}/{session_id}/{model_applied_file_path}"
         )
 
-        # Step 3: Prepare Lambda payload
-        lambda_service_payload = {
-            "data": {
-                "raw_file_path": raw_file_path,
-                "model_applied_file_path": model_applied_s3_key,
-            }
-        }
+        file_bytes = await bucket_service.read(raw_file_path)
+        file_like_object = io.BytesIO(file_bytes)
 
-        # Step 4: Invoke Lambda function for processing
-        lambda_inference_output = await lambda_service.invoke_function(
-            function_name="inference_func",
-            function_params=lambda_service_payload,
-        )
-
-        # Step 5: Get the S3 key of the processed file from Lambda response
-        model_applied_s3_key = lambda_inference_output.get("file_key")
-        if not model_applied_s3_key:
+        if file_like_object is None:
             raise HTTPException(
-                status_code=500, detail="Lambda did not return a valid file key"
+                status_code=500, detail="Failed to read the uploaded file."
             )
 
-        # Step 6: Update session data in Redis with the processed file key
+        df = pd.read_csv(file_like_object, engine="pyarrow", dtype_backend="pyarrow")
+        df_processed: pd.DataFrame = preprocess_df(df)
+
+        if (df_processed.empty) or (df_processed is None):
+            raise HTTPException(
+                status_code=500, detail="Failed to preprocess the uploaded file."
+            )
+
+        model, scaler, label_encoder = get_model_artifacts()
+        predicted_labels = predict_df(
+            df_processed[feature_columns], model, scaler, label_encoder
+        )
+        df_processed["Label"] = predicted_labels
+
+        labeled_buffer = io.BytesIO()
+        df_processed.to_csv(labeled_buffer, index=False)
+        labeled_buffer.seek(0)
+        labeled_file = UploadFile(filename=model_applied_file_path, file=labeled_buffer)
+
+        await bucket_service.upload(
+            file=labeled_file,
+            file_path=model_applied_file_path,
+            session_id=session_id,
+        )
+
         redis_client.set_session_data(
-            session_id, model_applied_s3_key, ttl_in_seconds=43200
+            session_id, model_applied_gcs_key, ttl_in_seconds=43200
         )
 
         return {
             "message": "File processed successfully",
             "session_id": session_id,
-            "s3_key": model_applied_s3_key,
+            "bucket_key": model_applied_gcs_key,
         }
 
     except Exception as e:
@@ -330,125 +384,11 @@ async def upload_complete(
         raise HTTPException(status_code=500, detail="Failed to process uploaded file.")
 
 
-@router.post("/upload-legacy")
-async def upload_file_legacy(
-    response: Response,
-    session_id: Optional[str] = Cookie(None),
-    file: Optional[UploadFile] = File(None),
-    samplefile: Optional[str] = None,
-    s3_service: S3 = Depends(S3),
-    lambda_service: LambdaService = Depends(LambdaService),
-):
-    """
-    Process the uploaded CSV file by:
-      1. Reading CSV data into a DataFrame.
-      2. Adding a unique 'id' column.
-      3. Cleaning data and dropping unnecessary columns.
-      4. Predicting labels using a pre-trained XGBoost model.
-      5. Uploading both the raw file and processed CSV to S3 in separate folders.
-      6. Storing the S3 key of the processed file in the Redis session.
-    """
-    # Determine the maximum upload size (default to 10MB if not defined)
-    MAX_UPLOAD_SIZE = getattr(
-        settings, "MAX_UPLOAD_SIZE", 10 * 1024 * 1024
-    )  # 10MB in bytes
-    print(f"MAX_UPLOAD_SIZE: {MAX_UPLOAD_SIZE}")
-
-    # 1. Validate input file
-    print(f"Sample file: {samplefile}")
-    if not samplefile:
-        if not file:
-            raise ValueError("File missing")
-
-        # Check file size before processing
-        file.file.seek(0, 2)  # Move to the end of the file to get size
-        file_size = file.file.tell()
-        file.file.seek(0)  # Reset file pointer to the beginning
-        print(f"File size: {file_size}")
-
-        if file_size > MAX_UPLOAD_SIZE:
-            raise HTTPException(
-                status_code=413,
-                detail=f"File size exceeds the maximum limit of {MAX_UPLOAD_SIZE / (1024 * 1024)} MB.",
-            )
-
-    # 2. Create a new session
-    session_id = str(uuid.uuid4())
-    response.set_cookie(
-        key=SESSION_COOKIE_NAME,
-        value=session_id,
-        max_age=43200,  # 12 hours
-        httponly=True,
-        secure=settings.SECURE_COOKIE,
-        samesite=settings.SAMESITE,
-    )
-
-    try:
-        if not samplefile:
-            raw_file = UploadFile(filename=f"{file.filename}", file=file.file)
-
-            raw_file_info = await s3_service.upload(
-                file=raw_file,
-                file_path=f"network-file/raw/{raw_file.filename}",
-                session_id=session_id,
-            )
-
-            lambda_service_payload = {
-                "data": {
-                    "raw_file_path": raw_file_info.get("s3_key"),
-                    "model_applied_file_path": f"uploads/{session_id}/network-file/model-applied/{raw_file.filename}",
-                }
-            }
-
-            lambda_inference_output = await lambda_service.invoke_function(
-                function_name="inference_func",
-                function_params=lambda_service_payload,
-            )
-
-            model_applied_s3_key = lambda_inference_output.get("file_key")
-
-            return_msg = "DataFrame successfully processed and stored in session."
-
-        else:
-            sample_mapping = {
-                "ssh-ftp.csv": "sample/model-applied/ssh-ftp.csv",
-                "ddos-ftp.csv": "sample/model-applied/ddos-ftp.csv",
-                "ftp_patator_occurence.csv": "sample/model-applied/ftp_patator_occurence.csv",
-                "portscan_dos_hulk_slowloris.csv": "sample/model-applied/portscan_dos_hulk_slowloris.csv",
-                "portscan_dos_hulk.csv": "sample/model-applied/portscan_dos_hulk.csv",
-                "portscan.csv": "sample/model-applied/portscan.csv",
-            }
-
-            model_applied_s3_key = sample_mapping.get(samplefile)
-
-            return_msg = "Sample file successfully processed and stored in session."
-
-        # Store or update the session data in Redis with the processed file's S3 key
-        redis_client.set_session_data(
-            session_id, model_applied_s3_key, ttl_in_seconds=43200
-        )
-
-        return {
-            "content": {
-                "message": return_msg,
-                "session_id": session_id,
-                "s3_key": model_applied_s3_key,
-            },
-            "status_code": 200,
-        }
-
-    except Exception as e:
-        print(f"An error occurred while processing the file: {e}")
-        raise HTTPException(
-            status_code=500, detail="Failed to process the uploaded file."
-        )
-
-
 @router.get("/attack-detection/brief/scatter")
 async def get_attack_detection_brief_scatter(
     attack_type: str,
     session_id: Optional[str] = Cookie(None),
-    s3_service: S3 = Depends(S3),
+    bucket_service: GCS = Depends(GCS),
 ):
     if not session_id:
         return Response(status_code=400, content="Session ID missing")
@@ -458,7 +398,7 @@ async def get_attack_detection_brief_scatter(
         if not session_data:
             return Response(status_code=400, content="Session Expired or not found")
 
-        file_data = await s3_service.read(session_data)
+        file_data = await bucket_service.read(session_data)
         file_like_object = io.BytesIO(file_data)
 
         data_frame = await preprocess(file_like_object)

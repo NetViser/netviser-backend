@@ -5,7 +5,7 @@ import pandas as pd
 import io
 
 from app.schemas.time_series import GetTimeSeriesAttackDataResponse
-from app.services.s3_service import S3
+from app.services.bucket_service import GCS
 from app.services.redis_service import RedisClient
 from app.configs.config import get_settings
 from app.utils.attack_features import (
@@ -96,20 +96,20 @@ async def get_time_series_attack_data(
     feature_name: Optional[str] = None,
     session_id: Optional[str] = Cookie(None),
     partition_index: int = Query(0, ge=0),
-    s3_service: S3 = Depends(S3),
+    bucket_service: GCS = Depends(GCS),
 ):
     if not session_id:
         raise HTTPException(status_code=400, detail="Session ID missing")
 
-    s3_key = redis_client.get_session_data(session_id)
-    if not s3_key:
+    bucket_key = redis_client.get_session_data(session_id)
+    if not bucket_key:
         raise HTTPException(status_code=400, detail="Session Expired or not found")
 
     try:
         # -----------------------------------------------------------------------
-        # 1. Read Data from S3
+        # 1. Read Data from GCS
         # -----------------------------------------------------------------------
-        file_data = await s3_service.read(s3_key)
+        file_data = await bucket_service.read(bucket_key)
         file_like_object = io.BytesIO(file_data)
         df = pd.read_csv(file_like_object, engine="pyarrow", dtype_backend="pyarrow")
 
