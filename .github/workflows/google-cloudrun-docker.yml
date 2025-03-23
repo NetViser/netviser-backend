@@ -8,6 +8,7 @@ on:
 env:
   GC_PROJECT_ID: 'netviser-454113'
   REGION: 'asia-southeast1'
+  SERVICE_ACCOUNT_NAME: 'netviser-action'
   GAR_NAME: 'netviser-backend-gar'
   GAR_LOCATION: 'asia-southeast1'
   SERVICE: 'netviser-backend'
@@ -50,7 +51,7 @@ jobs:
             --max-instances 1 \
             --memory 16Gi \
             --platform managed \
-            --service-account "netviser-storage@${{ env.GC_PROJECT_ID }}.iam.gserviceaccount.com" \
+            --service-account "${{ env.SERVICE_ACCOUNT_NAME }}@${{ env.GC_PROJECT_ID }}.iam.gserviceaccount.com" \
             --set-env-vars "GC_PROJECT_ID=${{ env.GC_PROJECT_ID }},GCS_BUCKET_NAME=${{ env.GCS_BUCKET_NAME }},GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }},GEMINI_MODEL=${{ secrets.GEMINI_MODEL }},MAX_UPLOAD_SIZE=${{ secrets.MAX_UPLOAD_SIZE }},REDIS_HOST=${{ secrets.REDIS_HOST }},REDIS_PASSWORD=${{ secrets.REDIS_PASSWORD }},REDIS_PORT=${{ secrets.REDIS_PORT }},REDIS_USERNAME=${{ secrets.REDIS_USERNAME }},ENV=${{ secrets.ENV }}"
 
       - name: Allow Unauthenticated Access
