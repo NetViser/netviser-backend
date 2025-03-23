@@ -48,11 +48,10 @@ class GCS:
                     scopes=["https://www.googleapis.com/auth/cloud-platform"]
                 )
                 self.client = storage.Client(credentials=credentials, project=settings.GC_PROJECT_ID)
-                self.use_adc = False  # Flag to indicate we're not using ADC
+                self.use_adc = False
             else:
                 raise ValueError(f"Local env detected but credentials file not found at: {credentials_path}")
         else:
-            # Non-local env (e.g., Cloud Run) - use ADC with token signing
             logger.info("Non-local env detected. Using ADC with token signing workaround")
             credentials, project_id = default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
             if credentials.token is None:
@@ -65,7 +64,7 @@ class GCS:
             if not self.service_account_email:
                 raise ValueError("Service account email not found in credentials")
             self.client = storage.Client(credentials=credentials, project=settings.GC_PROJECT_ID)
-            self.use_adc = True  # Flag to indicate we're using ADC
+            self.use_adc = True
 
         self.bucket = self.client.bucket(bucket_name)
         logger.info(f"GCS Client initialized for bucket: {bucket_name}")
@@ -75,22 +74,27 @@ class GCS:
             raise HTTPException(status_code=400, detail="Session ID missing")
 
         gcs_key = f"{self.path_prefix}/{session_id}/{file_path}"
+        MAX_FILE_SIZE = 1_073_741_824  # 1GB in bytes
 
         try:
-            logger.info(f"Generating signed PUT URL for: {gcs_key}")
+            logger.info(f"Generating signed PUT URL for: {gcs_key} with max size 1GB")
             blob = self.bucket.blob(gcs_key)
             if self.use_adc:
-                # Cloud Run workaround using ADC with service_account_email and access_token
                 url = blob.generate_signed_url(
                     expiration=expiration,
                     method="PUT",
                     version="v4",
                     service_account_email=self.service_account_email,
                     access_token=self.credentials.token,
+                    content_length_range=(0, MAX_FILE_SIZE)  # Restrict to 0-1GB
                 )
             else:
-                # Local env with service account key
-                url = blob.generate_signed_url(expiration=expiration, method="PUT", version="v4")
+                url = blob.generate_signed_url(
+                    expiration=expiration,
+                    method="PUT",
+                    version="v4",
+                    content_length_range=(0, MAX_FILE_SIZE)  # Restrict to 0-1GB
+                )
             logger.info(f"Generated presigned URL: {url}")
             return url
         except Exception as e:
