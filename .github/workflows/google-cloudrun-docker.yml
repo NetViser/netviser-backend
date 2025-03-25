@@ -48,6 +48,7 @@ jobs:
             --region ${{ env.REGION }} \
             --project ${{ env.GC_PROJECT_ID }} \
             --cpu 8 \
+            --min-instances 1 \
             --max-instances 1 \
             --memory 16Gi \
             --platform managed \
