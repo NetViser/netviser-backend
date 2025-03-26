@@ -7,7 +7,7 @@ on:
 
 env:
   GC_PROJECT_ID: 'netviser-454113'
-  REGION: 'asia-southeast1'
+  REGION: 'asia-southeast2'
   SERVICE_ACCOUNT_NAME: 'netviser-action'
   GAR_NAME: 'netviser-backend-gar'
   GAR_LOCATION: 'asia-southeast1'
