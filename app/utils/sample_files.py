@@ -7,7 +7,7 @@ sample_file_bucket_key_mapping = {
     "portscan_dos_hulk_slowloris.csv": "sample/model-applied/portscan_dos_hulk_slowloris.csv",
     "portscan_dos_hulk.csv": "sample/model-applied/portscan_dos_hulk.csv",
     "portscan.csv": "sample/model-applied/portscan.csv",
-    "ftp": "sample/model-applied/ftp.csv",
+    "ftp.csv": "sample/model-applied/ftp.csv",
     "ddos-large.csv": "sample/model-applied/ddos-large.csv",
     "dos-hulk.csv": "sample/model-applied/dos-hulk.csv",
 }
