@@ -3,6 +3,7 @@ import io
 import uuid
 import pandas as pd
 import logging
+from app.schemas.sample_files import SampleFileResponse, SampleFilesListResponse
 from app.schemas.upload import UploadCompleteResponse, UploadPresignedResponse, UploadSampleResponse
 from app.services.model_service import get_model_artifacts, predict_df
 from app.services.redis_service import RedisClient
@@ -16,6 +17,7 @@ from fastapi import (
     HTTPException,
     Query,
 )
+from app.utils.sample_files import sample_file_bucket_key_mapping, sample_file_featured_attacks_mapping
 
 from typing import Optional, Union
 from app.configs.config import get_settings
@@ -209,6 +211,22 @@ async def fetch_attack_records(
         print(e)
         return Response(status_code=400, content="Failed to retrieve data.")
 
+@router.get("/sample-network-files", response_model=SampleFilesListResponse)
+async def get_sample_files():
+    """
+    Retrieve the list of sample files and their featured attacks.
+    """
+    try:
+        sample_files = []
+        for sample_file, featured_attacks in sample_file_featured_attacks_mapping.items():
+            sample_files.append(
+                SampleFileResponse(name=sample_file, featuredAttacks=featured_attacks)
+            )
+
+        return SampleFilesListResponse(sample_files=sample_files)
+    except Exception as e:
+        print(e)
+        raise HTTPException(status_code=500, detail="Failed to retrieve sample files.")
 
 @router.post("/upload", response_model=Union[UploadSampleResponse, UploadPresignedResponse])
 async def upload_file(
@@ -245,16 +263,8 @@ async def upload_file(
 
         if sample_filename:
             logger.info(f"Processing sample file: {sample_filename}")
-            sample_mapping = {
-                "ssh-ftp.csv": "sample/model-applied/ssh-ftp.csv",
-                "ddos-ftp.csv": "sample/model-applied/ddos-ftp.csv",
-                "ftp_patator_occurence.csv": "sample/model-applied/ftp_patator_occurence.csv",
-                "portscan_dos_hulk_slowloris.csv": "sample/model-applied/portscan_dos_hulk_slowloris.csv",
-                "portscan_dos_hulk.csv": "sample/model-applied/portscan_dos_hulk.csv",
-                "portscan.csv": "sample/model-applied/portscan.csv",
-            }
 
-            model_applied_gcs_key = sample_mapping.get(sample_filename)
+            model_applied_gcs_key = sample_file_bucket_key_mapping.get(sample_filename)
             if not model_applied_gcs_key:
                 logger.warning(f"Invalid sample file name: {sample_filename}")
                 raise HTTPException(status_code=400, detail="Invalid sample file name")
