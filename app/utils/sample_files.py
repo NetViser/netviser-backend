@@ -7,9 +7,6 @@ sample_file_bucket_key_mapping = {
     "portscan_dos_hulk_slowloris.csv": "sample/model-applied/portscan_dos_hulk_slowloris.csv",
     "portscan_dos_hulk.csv": "sample/model-applied/portscan_dos_hulk.csv",
     "portscan.csv": "sample/model-applied/portscan.csv",
-    "ftp.csv": "sample/model-applied/ftp.csv",
-    "ddos-large.csv": "sample/model-applied/ddos-large.csv",
-    "dos-hulk.csv": "sample/model-applied/dos-hulk.csv",
 }
 
 sample_file_featured_attacks_mapping = {
@@ -19,7 +16,4 @@ sample_file_featured_attacks_mapping = {
     "portscan_dos_hulk_slowloris.csv": ["DoS Hulk", "DoS Slowloris", "PortScan"],
     "portscan_dos_hulk.csv": ["DoS Hulk", "PortScan"],
     "portscan.csv": ["PortScan"],
-    "ftp.csv": ["FTP-Patator"],
-    "ddos-large.csv": ["DDoS"],
-    "dos-hulk.csv": ["DoS Hulk"],
 }

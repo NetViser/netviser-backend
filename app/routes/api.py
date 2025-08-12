@@ -4,8 +4,11 @@ import uuid
 import pandas as pd
 import logging
 from app.schemas.sample_files import SampleFileResponse, SampleFilesListResponse
-from app.schemas.upload import UploadCompleteResponse, UploadPresignedResponse, UploadSampleResponse
-from app.services.model_service import get_model_artifacts, predict_df
+from app.schemas.upload import (
+    UploadCompleteResponse,
+    UploadPresignedResponse,
+    UploadSampleResponse,
+)
 from app.services.redis_service import RedisClient
 from fastapi import (
     APIRouter,
@@ -17,7 +20,10 @@ from fastapi import (
     HTTPException,
     Query,
 )
-from app.utils.sample_files import sample_file_bucket_key_mapping, sample_file_featured_attacks_mapping
+from app.utils.sample_files import (
+    sample_file_bucket_key_mapping,
+    sample_file_featured_attacks_mapping,
+)
 
 from typing import Optional, Union
 from app.configs.config import get_settings
@@ -178,7 +184,6 @@ async def fetch_attack_records(
 
         attack_data = [
             {
-                "id": row["id"],
                 "timestamp": row["Timestamp"].isoformat(),
                 "flowBytesPerSecond": row["Flow Bytes/s"],
                 "flowDuration": row["Flow Duration"],
@@ -211,6 +216,7 @@ async def fetch_attack_records(
         print(e)
         return Response(status_code=400, content="Failed to retrieve data.")
 
+
 @router.get("/sample-network-files", response_model=SampleFilesListResponse)
 async def get_sample_files():
     """
@@ -218,7 +224,10 @@ async def get_sample_files():
     """
     try:
         sample_files = []
-        for sample_file, featured_attacks in sample_file_featured_attacks_mapping.items():
+        for (
+            sample_file,
+            featured_attacks,
+        ) in sample_file_featured_attacks_mapping.items():
             sample_files.append(
                 SampleFileResponse(name=sample_file, featuredAttacks=featured_attacks)
             )
@@ -228,7 +237,10 @@ async def get_sample_files():
         print(e)
         raise HTTPException(status_code=500, detail="Failed to retrieve sample files.")
 
-@router.post("/upload", response_model=Union[UploadSampleResponse, UploadPresignedResponse])
+
+@router.post(
+    "/upload", response_model=Union[UploadSampleResponse, UploadPresignedResponse]
+)
 async def upload_file(
     response: Response,
     filename: Optional[str] = Form(None),
@@ -270,7 +282,7 @@ async def upload_file(
                 raise HTTPException(status_code=400, detail="Invalid sample file name")
 
             logger.debug(f"Mapping found: {model_applied_gcs_key}")
-            logger.info(f"Setting Redis session data for sample file")
+            logger.info("Setting Redis session data for sample file")
             redis_client.set_session_data(
                 session_id, model_applied_gcs_key, ttl_in_seconds=43200
             )
