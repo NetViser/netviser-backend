@@ -184,6 +184,7 @@ async def fetch_attack_records(
 
         attack_data = [
             {
+                "id": row["id"],
                 "timestamp": row["Timestamp"].isoformat(),
                 "flowBytesPerSecond": row["Flow Bytes/s"],
                 "flowDuration": row["Flow Duration"],
